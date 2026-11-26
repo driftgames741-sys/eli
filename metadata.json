@@ -1,0 +1,6 @@
+{
+  "name": "ROTOR OPS — Simulador 3D de Helicóptero",
+  "description": "Simulador arcade 3D low-poly de helicóptero sobre uma ilha costeira com base aérea, centro urbano, helipontos em arranha-céus, física realista e telemetria de aviação.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
