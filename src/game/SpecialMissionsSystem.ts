@@ -656,7 +656,7 @@ export class SpecialMissionsSystem {
     // Boat floor deck
     const deck = new THREE.Mesh(this.trackGeo(new THREE.BoxGeometry(2.1, 0.28, 4.4)), whiteMat);
     deck.position.set(0, 0.22, 0);
-    deck.castShadow = true;
+    deck.castShadow = false;
     this.seaBoatGroup.add(deck);
 
     // Side inflatable pontoons
@@ -665,7 +665,7 @@ export class SpecialMissionsSystem {
     for (const sx of [-1.1, 1.1]) {
       const tube = new THREE.Mesh(tubeGeo, orangeMat);
       tube.position.set(sx, 0.48, 0);
-      tube.castShadow = true;
+      tube.castShadow = false;
       this.seaBoatGroup.add(tube);
     }
 
@@ -753,7 +753,7 @@ export class SpecialMissionsSystem {
 
     const torso = new THREE.Mesh(this.trackGeo(new THREE.BoxGeometry(0.62, 0.78, 0.44)), jacketMat);
     torso.position.set(0, 0.76, -0.05);
-    torso.castShadow = true;
+    torso.castShadow = false;
     this.mountainSkierGroup.add(torso);
 
     const pack = new THREE.Mesh(this.trackGeo(new THREE.BoxGeometry(0.46, 0.58, 0.28)), pantsMat);
@@ -871,7 +871,7 @@ export class SpecialMissionsSystem {
       basketMat
     );
     basketPan.position.set(0, 0, 0);
-    basketPan.castShadow = true;
+    basketPan.castShadow = false;
     this.winchBasketGroup.add(basketPan);
 
     const railGeo = this.trackGeo(new THREE.BoxGeometry(0.08, 0.42, 1.72));

@@ -405,12 +405,12 @@ export default function App() {
                   <span className="text-slate-300">Gráficos / LOD</span>
                   <span className="text-[10px] text-slate-400">
                     {telemetry.graphicsQuality === 'ultra'
-                      ? 'Sombras 1K · Arranha-Céus'
+                      ? 'Sombras 2K · 1.5x · Máx.'
                       : telemetry.graphicsQuality === 'high'
-                        ? 'Sombras 1K · Balanceado'
+                        ? 'Sombras 2K · 1.5x · PBR'
                         : telemetry.graphicsQuality === 'medium'
-                          ? 'Sombras 512 · Só Heli'
-                          : 'Ultra Leve · 512 Heli'}
+                          ? 'Sombras 2K · 1.5x · Eco'
+                          : 'Leve · 1.0x · Sombras 1K'}
                   </span>
                 </div>
                 <div className="grid grid-cols-4 gap-1 bg-slate-950/90 p-0.5 rounded-md border border-slate-800">

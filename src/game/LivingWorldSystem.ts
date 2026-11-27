@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import {
   BEACH_PAD_POS,
   getIslandCoastRadius,
@@ -55,9 +56,19 @@ interface AmbientCar {
 }
 
 interface AmbientShip {
-  group: THREE.Group;
-  wakeMesh: THREE.Mesh;
-  wakeMat: THREE.MeshBasicMaterial;
+  x: number;
+  y: number;
+  z: number;
+  heading: number;
+  scale: number;
+  hullColor: number;
+  deckColor: number;
+  accentColor: number;
+  hullLen: number;
+  hullW: number;
+  hullH: number;
+  bridgeZ: number;
+  bridgeH: number;
   centerX: number;
   centerZ: number;
   radiusX: number;
@@ -69,9 +80,6 @@ interface AmbientShip {
 }
 
 interface AmbientGull {
-  group: THREE.Group;
-  leftWing: THREE.Mesh;
-  rightWing: THREE.Mesh;
   centerX: number;
   centerZ: number;
   radius: number;
@@ -84,6 +92,10 @@ interface AmbientGull {
 
 // Pre-allocated math helpers (zero GC in render loop)
 const _dummy = new THREE.Object3D();
+const _childDummy = new THREE.Object3D();
+const _shipMat = new THREE.Matrix4();
+const _wingMat = new THREE.Matrix4();
+const _gullMat = new THREE.Matrix4();
 const _tmpColor = new THREE.Color();
 const _tmpVantage = new THREE.Vector3();
 const _cullSphere = new THREE.Sphere();
@@ -93,6 +105,40 @@ const _dotUp = new THREE.Vector3(0, 1, 0);
 const _dotPos = new THREE.Vector3();
 const _dotScale = new THREE.Vector3();
 const _dotMat = new THREE.Matrix4();
+
+function prepColoredPart(
+  raw: THREE.BufferGeometry,
+  colorHex: number,
+  tx = 0,
+  ty = 0,
+  tz = 0,
+  rx = 0,
+  ry = 0,
+  rz = 0,
+  sx = 1,
+  sy = 1,
+  sz = 1
+): THREE.BufferGeometry {
+  const g = raw.index ? raw.toNonIndexed() : raw.clone();
+  if (g.getAttribute('uv')) g.deleteAttribute('uv');
+  if (sx !== 1 || sy !== 1 || sz !== 1) g.scale(sx, sy, sz);
+  if (rx !== 0) g.rotateX(rx);
+  if (ry !== 0) g.rotateY(ry);
+  if (rz !== 0) g.rotateZ(rz);
+  if (tx !== 0 || ty !== 0 || tz !== 0) g.translate(tx, ty, tz);
+  if (!g.getAttribute('normal')) g.computeVertexNormals();
+  const count = g.getAttribute('position').count;
+  const col = new THREE.Color(colorHex);
+  const colors = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    colors[i * 3] = col.r;
+    colors[i * 3 + 1] = col.g;
+    colors[i * 3 + 2] = col.b;
+  }
+  g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  raw.dispose();
+  return g;
+}
 
 function shortestAngleDiff(from: number, to: number): number {
   let d = (to - from) % (Math.PI * 2);
@@ -133,15 +179,22 @@ export class LivingWorldSystem {
   private farCarHeadDotMat: THREE.MeshBasicMaterial;
   private farCarTailDotMat: THREE.MeshBasicMaterial;
 
-  // Maritime traffic vessels
+  // Maritime traffic vessels (1 merged cargo mesh + 3 InstancedMeshes for boats + 1 wake + 3 night nav InstancedMeshes)
   private ships: AmbientShip[] = [];
-  private shipNavRedMat: THREE.MeshStandardMaterial;
-  private shipNavGreenMat: THREE.MeshStandardMaterial;
-  private shipNavWhiteMat: THREE.MeshStandardMaterial;
+  private cargoShipMesh!: THREE.Mesh;
+  private boatHullInst!: THREE.InstancedMesh;
+  private boatDeckInst!: THREE.InstancedMesh;
+  private boatBridgeInst!: THREE.InstancedMesh;
+  private shipWakeInst!: THREE.InstancedMesh;
+  private shipWakeMat!: THREE.MeshBasicMaterial;
+  private shipNavRedInst!: THREE.InstancedMesh;
+  private shipNavGreenInst!: THREE.InstancedMesh;
+  private shipNavWhiteInst!: THREE.InstancedMesh;
 
-  // Daytime coastal seagulls
+  // Daytime coastal seagulls (2 InstancedMeshes total: body+beak & flapping wings)
   private gulls: AmbientGull[] = [];
-  private gullsGroup = new THREE.Group();
+  private gullBodyInst!: THREE.InstancedMesh;
+  private gullWingInst!: THREE.InstancedMesh;
   private shipsKinematicsSteppedThisFrame = false;
 
   constructor() {
@@ -291,34 +344,11 @@ export class LivingWorldSystem {
 
     this.initAmbientCars();
 
-    // === 2. MARITIME TRAFFIC (5 LOW-POLY SHIPS & BOATS) ===
-    this.shipNavRedMat = this.trackMat(
-      new THREE.MeshStandardMaterial({
-        color: 0xef4444,
-        emissive: 0xff2222,
-        emissiveIntensity: 0.2,
-      })
-    );
-    this.shipNavGreenMat = this.trackMat(
-      new THREE.MeshStandardMaterial({
-        color: 0x22c55e,
-        emissive: 0x22ff55,
-        emissiveIntensity: 0.2,
-      })
-    );
-    this.shipNavWhiteMat = this.trackMat(
-      new THREE.MeshStandardMaterial({
-        color: 0xfffbeb,
-        emissive: 0xfff8d6,
-        emissiveIntensity: 0.2,
-      })
-    );
-
+    // === 2. MARITIME TRAFFIC (INSTANCED / MERGED SHIPS & BOATS) ===
     this.initAmbientShips();
 
-    // === 3. DAYTIME COASTAL SEAGULLS (3 SOARING BIRDS) ===
+    // === 3. DAYTIME COASTAL SEAGULLS (2 INSTANCED MESHES) ===
     this.initCoastalGulls();
-    this.root.add(this.gullsGroup);
   }
 
   private trackGeo<T extends THREE.BufferGeometry>(g: T): T {
@@ -498,147 +528,196 @@ export class LivingWorldSystem {
       },
     ];
 
+    // 1. Build 1 merged vertex-colored Cargo Ship mesh (1 draw call total for cargo vessel)
+    const cargoCfg = shipConfigs[0];
+    {
+      const hullLen = 18;
+      const hullW = 5.2;
+      const hullH = 2.4;
+      const bridgeZ = -hullLen * 0.3;
+      const bridgeH = 4.4;
+      const parts: THREE.BufferGeometry[] = [];
+      parts.push(
+        prepColoredPart(new THREE.BoxGeometry(hullW, hullH, hullLen), cargoCfg.hullColor, 0, hullH * 0.4, 0)
+      );
+      const bowRaw = new THREE.CylinderGeometry(0.1, hullW * 0.68, hullH, 4);
+      bowRaw.rotateY(Math.PI / 4);
+      parts.push(
+        prepColoredPart(bowRaw, cargoCfg.hullColor, 0, hullH * 0.4, hullLen * 0.5 + hullW * 0.26, 0, 0, 0, 1, 1, 1.35)
+      );
+      parts.push(
+        prepColoredPart(new THREE.BoxGeometry(hullW * 0.9, 0.24, hullLen * 0.92), cargoCfg.deckColor, 0, hullH * 0.9, 0)
+      );
+      parts.push(
+        prepColoredPart(
+          new THREE.BoxGeometry(hullW * 0.72, bridgeH, hullLen * 0.26),
+          cargoCfg.accentColor,
+          0,
+          hullH * 0.9 + bridgeH * 0.5,
+          bridgeZ
+        )
+      );
+      parts.push(
+        prepColoredPart(
+          new THREE.BoxGeometry(hullW * 0.74, 0.75, hullLen * 0.22),
+          0x0f172a,
+          0,
+          hullH * 0.9 + bridgeH * 0.72,
+          bridgeZ + 0.16
+        )
+      );
+      const containerColors = [0x2563eb, 0xf97316, 0x16a34a, 0xeab308];
+      for (let row = 0; row < 2; row++) {
+        for (let col = 0; col < 2; col++) {
+          parts.push(
+            prepColoredPart(
+              new THREE.BoxGeometry(1.9, 1.5, 4.2),
+              containerColors[(row * 2 + col) % containerColors.length],
+              col === 0 ? -1.1 : 1.1,
+              hullH * 0.9 + 0.85,
+              1.8 + row * 4.5
+            )
+          );
+        }
+      }
+      const cargoGeo = this.trackGeo(mergeGeometries(parts, false)!);
+      for (const p of parts) p.dispose();
+      const cargoMat = this.trackMat(
+        new THREE.MeshLambertMaterial({ color: 0xffffff, vertexColors: true })
+      );
+      this.cargoShipMesh = new THREE.Mesh(cargoGeo, cargoMat);
+      this.cargoShipMesh.scale.setScalar(cargoCfg.scale);
+      this.cargoShipMesh.castShadow = false;
+      this.cargoShipMesh.receiveShadow = false;
+      this.cargoShipMesh.frustumCulled = true;
+      this.root.add(this.cargoShipMesh);
+    }
+
+    // 2. Build 3 InstancedMeshes for the 6 medium ships (hull, deck+mast, bridge+glass)
+    const boatCount = shipConfigs.length - 1;
+    const bLen = 11.5;
+    const bW = 3.6;
+    const bH = 1.5;
+    const bBridgeZ = -bLen * 0.1;
+    const bBridgeH = 2.3;
+
+    const hullParts: THREE.BufferGeometry[] = [
+      prepColoredPart(new THREE.BoxGeometry(bW, bH, bLen), 0xffffff, 0, bH * 0.4, 0),
+    ];
+    const bBowRaw = new THREE.CylinderGeometry(0.1, bW * 0.68, bH, 4);
+    bBowRaw.rotateY(Math.PI / 4);
+    hullParts.push(
+      prepColoredPart(bBowRaw, 0xffffff, 0, bH * 0.4, bLen * 0.5 + bW * 0.26, 0, 0, 0, 1, 1, 1.35)
+    );
+    const boatHullGeo = this.trackGeo(mergeGeometries(hullParts, false)!);
+    for (const p of hullParts) p.dispose();
+
+    const deckParts: THREE.BufferGeometry[] = [
+      prepColoredPart(new THREE.BoxGeometry(bW * 0.9, 0.24, bLen * 0.92), 0xffffff, 0, bH * 0.9, 0),
+      prepColoredPart(
+        new THREE.CylinderGeometry(0.08, 0.12, 3.2, 6),
+        0xffffff,
+        0,
+        bH * 0.9 + bBridgeH + 1.4,
+        bBridgeZ
+      ),
+    ];
+    const boatDeckGeo = this.trackGeo(mergeGeometries(deckParts, false)!);
+    for (const p of deckParts) p.dispose();
+
+    // Bridge uses vertexColors so dark bridge windows stay dark while accentColor tints the superstructure
+    const bridgeParts: THREE.BufferGeometry[] = [
+      prepColoredPart(
+        new THREE.BoxGeometry(bW * 0.72, bBridgeH, bLen * 0.26),
+        0xffffff,
+        0,
+        bH * 0.9 + bBridgeH * 0.5,
+        bBridgeZ
+      ),
+      prepColoredPart(
+        new THREE.BoxGeometry(bW * 0.74, 0.75, bLen * 0.22),
+        0x111827,
+        0,
+        bH * 0.9 + bBridgeH * 0.72,
+        bBridgeZ + 0.16
+      ),
+    ];
+    const boatBridgeGeo = this.trackGeo(mergeGeometries(bridgeParts, false)!);
+    for (const p of bridgeParts) p.dispose();
+
+    const boatTintMat = this.trackMat(new THREE.MeshLambertMaterial({ color: 0xffffff }));
+    const boatBridgeMat = this.trackMat(
+      new THREE.MeshLambertMaterial({ color: 0xffffff, vertexColors: true })
+    );
+
+    this.boatHullInst = new THREE.InstancedMesh(boatHullGeo, boatTintMat, boatCount);
+    this.boatDeckInst = new THREE.InstancedMesh(boatDeckGeo, boatTintMat, boatCount);
+    this.boatBridgeInst = new THREE.InstancedMesh(boatBridgeGeo, boatBridgeMat, boatCount);
+    for (const inst of [this.boatHullInst, this.boatDeckInst, this.boatBridgeInst]) {
+      inst.castShadow = false;
+      inst.receiveShadow = false;
+      inst.frustumCulled = false;
+      this.root.add(inst);
+    }
+
+    // 3. Shared InstancedMesh for all 7 ship wakes (1 draw call, hidden when far)
+    this.shipWakeMat = this.trackMat(
+      new THREE.MeshBasicMaterial({
+        color: 0xe0f2fe,
+        transparent: true,
+        opacity: 0.36,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      })
+    );
+    const wakeGeo = this.trackGeo(new THREE.PlaneGeometry(1, 1));
+    wakeGeo.rotateX(-Math.PI / 2);
+    this.shipWakeInst = new THREE.InstancedMesh(wakeGeo, this.shipWakeMat, shipConfigs.length);
+    this.shipWakeInst.castShadow = false;
+    this.shipWakeInst.receiveShadow = false;
+    this.shipWakeInst.frustumCulled = false;
+    this.root.add(this.shipWakeInst);
+
+    // 4. Shared InstancedMeshes for ship navigation lights (hidden during clear daylight = 0 draw calls!)
+    const navGeo = this.trackGeo(new THREE.SphereGeometry(0.26, 6, 5));
+    const navRedMat = this.trackMat(new THREE.MeshBasicMaterial({ color: 0xff3b3b }));
+    const navGreenMat = this.trackMat(new THREE.MeshBasicMaterial({ color: 0x22ff66 }));
+    const navWhiteMat = this.trackMat(new THREE.MeshBasicMaterial({ color: 0xfff8d6 }));
+
+    this.shipNavRedInst = new THREE.InstancedMesh(navGeo, navRedMat, shipConfigs.length);
+    this.shipNavGreenInst = new THREE.InstancedMesh(navGeo, navGreenMat, shipConfigs.length);
+    this.shipNavWhiteInst = new THREE.InstancedMesh(navGeo, navWhiteMat, shipConfigs.length);
+    for (const inst of [this.shipNavRedInst, this.shipNavGreenInst, this.shipNavWhiteInst]) {
+      inst.castShadow = false;
+      inst.receiveShadow = false;
+      inst.frustumCulled = false;
+      inst.visible = false;
+      this.root.add(inst);
+    }
+
     for (let i = 0; i < shipConfigs.length; i++) {
       const cfg = shipConfigs[i];
-      const group = new THREE.Group();
-
-      const hullMat = this.trackMat(
-        new THREE.MeshStandardMaterial({
-          color: cfg.hullColor,
-          roughness: 0.52,
-          metalness: 0.22,
-        })
-      );
-      const deckMat = this.trackMat(
-        new THREE.MeshStandardMaterial({
-          color: cfg.deckColor,
-          roughness: 0.62,
-          metalness: 0.14,
-        })
-      );
-      const accentMat = this.trackMat(
-        new THREE.MeshStandardMaterial({
-          color: cfg.accentColor,
-          roughness: 0.35,
-          metalness: 0.3,
-        })
-      );
-      const glassMat = this.trackMat(
-        new THREE.MeshStandardMaterial({
-          color: 0x0f172a,
-          roughness: 0.12,
-          metalness: 0.82,
-        })
-      );
-
-      // Primary hull (facing +Z)
-      const hullLen = cfg.kind === 'cargo' ? 18 : 11.5;
-      const hullW = cfg.kind === 'cargo' ? 5.2 : 3.6;
-      const hullH = cfg.kind === 'cargo' ? 2.4 : 1.5;
-
-      const mainHull = new THREE.Mesh(
-        this.trackGeo(new THREE.BoxGeometry(hullW, hullH, hullLen)),
-        hullMat
-      );
-      mainHull.position.set(0, hullH * 0.4, 0);
-      group.add(mainHull);
-
-      // Pointed bow wedge
-      const bowGeo = this.trackGeo(new THREE.CylinderGeometry(0.1, hullW * 0.68, hullH, 4));
-      bowGeo.rotateY(Math.PI / 4);
-      const bow = new THREE.Mesh(bowGeo, hullMat);
-      bow.position.set(0, hullH * 0.4, hullLen * 0.5 + hullW * 0.26);
-      bow.scale.set(1, 1, 1.35);
-      group.add(bow);
-
-      // Upper deck plate
-      const deck = new THREE.Mesh(
-        this.trackGeo(new THREE.BoxGeometry(hullW * 0.9, 0.24, hullLen * 0.92)),
-        deckMat
-      );
-      deck.position.set(0, hullH * 0.9, 0);
-      group.add(deck);
-
-      // Superstructure / Bridge
-      const bridgeZ = cfg.kind === 'cargo' ? -hullLen * 0.3 : -hullLen * 0.1;
-      const bridgeH = cfg.kind === 'cargo' ? 4.4 : 2.3;
-      const bridge = new THREE.Mesh(
-        this.trackGeo(new THREE.BoxGeometry(hullW * 0.72, bridgeH, hullLen * 0.26)),
-        accentMat
-      );
-      bridge.position.set(0, hullH * 0.9 + bridgeH * 0.5, bridgeZ);
-      group.add(bridge);
-
-      const bridgeWindows = new THREE.Mesh(
-        this.trackGeo(new THREE.BoxGeometry(hullW * 0.74, 0.75, hullLen * 0.22)),
-        glassMat
-      );
-      bridgeWindows.position.set(0, hullH * 0.9 + bridgeH * 0.72, bridgeZ + 0.16);
-      group.add(bridgeWindows);
-
-      // Cargo containers or radar mast detail
-      if (cfg.kind === 'cargo') {
-        const containerColors = [0x2563eb, 0xf97316, 0x16a34a, 0xeab308];
-        const contGeo = this.trackGeo(new THREE.BoxGeometry(1.9, 1.5, 4.2));
-        for (let row = 0; row < 2; row++) {
-          for (let col = 0; col < 2; col++) {
-            const cMat = this.trackMat(
-              new THREE.MeshStandardMaterial({
-                color: containerColors[(row * 2 + col) % containerColors.length],
-                roughness: 0.65,
-              })
-            );
-            const cont = new THREE.Mesh(contGeo, cMat);
-            cont.position.set(col === 0 ? -1.1 : 1.1, hullH * 0.9 + 0.85, 1.8 + row * 4.5);
-            group.add(cont);
-          }
-        }
-      } else {
-        const mast = new THREE.Mesh(
-          this.trackGeo(new THREE.CylinderGeometry(0.08, 0.12, 3.2, 6)),
-          deckMat
-        );
-        mast.position.set(0, hullH * 0.9 + bridgeH + 1.4, bridgeZ);
-        group.add(mast);
-      }
-
-      // Port (Red), Starboard (Green) & Masthead (White) navigation lights
-      const navGeo = this.trackGeo(new THREE.SphereGeometry(0.24, 6, 6));
-      const portLight = new THREE.Mesh(navGeo, this.shipNavRedMat);
-      portLight.position.set(hullW * 0.48, hullH + 0.6, hullLen * 0.25);
-      group.add(portLight);
-
-      const stbdLight = new THREE.Mesh(navGeo, this.shipNavGreenMat);
-      stbdLight.position.set(-hullW * 0.48, hullH + 0.6, hullLen * 0.25);
-      group.add(stbdLight);
-
-      const mastLight = new THREE.Mesh(navGeo, this.shipNavWhiteMat);
-      mastLight.position.set(0, hullH * 0.9 + bridgeH + (cfg.kind === 'cargo' ? 1.2 : 3.0), bridgeZ);
-      group.add(mastLight);
-
-      // Trailing white foam wake plane behind the stern (-Z)
-      const wakeMat = this.trackMat(
-        new THREE.MeshBasicMaterial({
-          color: 0xe0f2fe,
-          transparent: true,
-          opacity: 0.42,
-          depthWrite: false,
-          side: THREE.DoubleSide,
-        })
-      );
-      const wakeGeo = this.trackGeo(new THREE.PlaneGeometry(hullW * 1.15, hullLen * 1.65));
-      wakeGeo.rotateX(-Math.PI / 2);
-      const wakeMesh = new THREE.Mesh(wakeGeo, wakeMat);
-      wakeMesh.position.set(0, 0.18, -hullLen * 1.28);
-      group.add(wakeMesh);
-
-      group.scale.setScalar(cfg.scale);
-      this.root.add(group);
+      const isCargo = cfg.kind === 'cargo';
+      const hullLen = isCargo ? 18 : 11.5;
+      const hullW = isCargo ? 5.2 : 3.6;
+      const hullH = isCargo ? 2.4 : 1.5;
+      const bridgeZ = isCargo ? -hullLen * 0.3 : -hullLen * 0.1;
+      const bridgeH = isCargo ? 4.4 : 2.3;
 
       this.ships.push({
-        group,
-        wakeMesh,
-        wakeMat,
+        x: cfg.centerX + Math.cos(cfg.startAngle) * cfg.radiusX,
+        y: OCEAN_LEVEL,
+        z: cfg.centerZ + Math.sin(cfg.startAngle) * cfg.radiusZ,
+        heading: 0,
+        scale: cfg.scale,
+        hullColor: cfg.hullColor,
+        deckColor: cfg.deckColor,
+        accentColor: cfg.accentColor,
+        hullLen,
+        hullW,
+        hullH,
+        bridgeZ,
+        bridgeH,
         centerX: cfg.centerX,
         centerZ: cfg.centerZ,
         radiusX: cfg.radiusX,
@@ -646,22 +725,13 @@ export class LivingWorldSystem {
         angle: cfg.startAngle,
         angularSpeed: cfg.angularSpeed,
         bobPhase: i * 1.37,
-        isCargo: cfg.kind === 'cargo',
+        isCargo,
       });
     }
+    this.stepShipKinematics(0);
   }
 
   private initCoastalGulls(): void {
-    const bodyMat = this.trackMat(
-      new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.65 })
-    );
-    const wingMat = this.trackMat(
-      new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.6 })
-    );
-    const beakMat = this.trackMat(
-      new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.5 })
-    );
-
     const gullSpecs = [
       { cx: BEACH_PAD_POS.x + 80, cz: BEACH_PAD_POS.z + 180, r: 145, alt: 40, speed: 0.28, phase: 0.0 },
       { cx: PORT_QUAY_POS.x - 160, cz: PORT_QUAY_POS.z, r: 135, alt: 48, speed: -0.26, phase: 2.1 },
@@ -669,37 +739,43 @@ export class LivingWorldSystem {
       { cx: BEACH_PAD_POS.x - 120, cz: BEACH_PAD_POS.z + 240, r: 120, alt: 34, speed: -0.3, phase: 1.2 },
     ];
 
-    const bodyGeo = this.trackGeo(new THREE.ConeGeometry(0.24, 1.35, 6));
-    bodyGeo.rotateX(Math.PI / 2);
-    const beakGeo = this.trackGeo(new THREE.ConeGeometry(0.08, 0.32, 5));
-    beakGeo.rotateX(Math.PI / 2);
-    const leftWingGeo = this.trackGeo(new THREE.BoxGeometry(1.45, 0.06, 0.42));
-    leftWingGeo.translate(0.72, 0, 0);
-    const rightWingGeo = this.trackGeo(new THREE.BoxGeometry(1.45, 0.06, 0.42));
-    rightWingGeo.translate(-0.72, 0, 0);
+    // Merged body + orange beak (1 draw call for all gulls)
+    const bodyRaw = new THREE.ConeGeometry(0.24, 1.35, 6);
+    bodyRaw.rotateX(Math.PI / 2);
+    const beakRaw = new THREE.ConeGeometry(0.08, 0.32, 5);
+    beakRaw.rotateX(Math.PI / 2);
+    const gullParts = [
+      prepColoredPart(bodyRaw, 0xf8fafc, 0, 0, 0),
+      prepColoredPart(beakRaw, 0xf59e0b, 0, 0, 0.78),
+    ];
+    const mergedBodyGeo = this.trackGeo(mergeGeometries(gullParts, false)!);
+    for (const p of gullParts) p.dispose();
+    const gullBodyMat = this.trackMat(
+      new THREE.MeshLambertMaterial({ color: 0xffffff, vertexColors: true })
+    );
+    this.gullBodyInst = new THREE.InstancedMesh(mergedBodyGeo, gullBodyMat, gullSpecs.length);
+    this.gullBodyInst.castShadow = false;
+    this.gullBodyInst.receiveShadow = false;
+    this.gullBodyInst.frustumCulled = false;
+    this.gullBodyInst.count = 0;
+    this.gullBodyInst.visible = false;
+    this.root.add(this.gullBodyInst);
+
+    // Flapping wing InstancedMesh (2 instances per visible gull = 1 draw call total)
+    const wingGeo = this.trackGeo(new THREE.BoxGeometry(1.45, 0.06, 0.42));
+    wingGeo.translate(0.72, 0, 0);
+    const wingMat = this.trackMat(new THREE.MeshLambertMaterial({ color: 0xe2e8f0 }));
+    this.gullWingInst = new THREE.InstancedMesh(wingGeo, wingMat, gullSpecs.length * 2);
+    this.gullWingInst.castShadow = false;
+    this.gullWingInst.receiveShadow = false;
+    this.gullWingInst.frustumCulled = false;
+    this.gullWingInst.count = 0;
+    this.gullWingInst.visible = false;
+    this.root.add(this.gullWingInst);
 
     for (let i = 0; i < gullSpecs.length; i++) {
       const sp = gullSpecs[i];
-      const group = new THREE.Group();
-      const body = new THREE.Mesh(bodyGeo, bodyMat);
-      group.add(body);
-      const beak = new THREE.Mesh(beakGeo, beakMat);
-      beak.position.set(0, 0, 0.78);
-      group.add(beak);
-
-      const leftWing = new THREE.Mesh(leftWingGeo, wingMat);
-      leftWing.position.set(0.14, 0.06, 0.05);
-      group.add(leftWing);
-
-      const rightWing = new THREE.Mesh(rightWingGeo, wingMat);
-      rightWing.position.set(-0.14, 0.06, 0.05);
-      group.add(rightWing);
-
-      this.gullsGroup.add(group);
       this.gulls.push({
-        group,
-        leftWing,
-        rightWing,
         centerX: sp.cx,
         centerZ: sp.cz,
         radius: sp.r,
@@ -895,9 +971,9 @@ export class LivingWorldSystem {
       const vz = Math.cos(s.angle) * s.radiusZ * s.angularSpeed;
       const heading = Math.atan2(vx, vz);
 
-      s.group.position.x = sx;
-      s.group.position.z = sz;
-      s.group.rotation.y = heading;
+      s.x = sx;
+      s.z = sz;
+      s.heading = heading;
     }
   }
 
@@ -1004,18 +1080,20 @@ export class LivingWorldSystem {
       this.farCarTailDotInst.visible = false;
     }
 
-    // 3. Advance 5 Offshore Ships/Boats with Frustum-Culled wave bobbing & foam wake
+    // 3. Advance Offshore Ships/Boats (batched InstancedMesh + 1 merged Cargo Mesh)
     if (!this.shipsKinematicsSteppedThisFrame) {
       this.stepShipKinematics(dt);
     }
     this.shipsKinematicsSteppedThisFrame = false;
 
-    const shipNavIntensity = 0.25 + lightsFactor * 5.0;
-    this.shipNavRedMat.emissiveIntensity = shipNavIntensity;
-    this.shipNavGreenMat.emissiveIntensity = shipNavIntensity;
-    this.shipNavWhiteMat.emissiveIntensity = shipNavIntensity;
-
     const stormWaveMult = weather === 'STORM' ? 2.55 : weather === 'BLIZZARD' ? 1.45 : 1.0;
+    const showNavLights = lightsFactor > 0.08;
+    this.shipWakeMat.opacity = 0.36 * (1 - nightFactor * 0.45);
+
+    let boatVisIdx = 0;
+    let wakeVisIdx = 0;
+    let navVisIdx = 0;
+    this.cargoShipMesh.visible = false;
 
     for (let i = 0; i < this.ships.length; i++) {
       const s = this.ships[i];
@@ -1023,40 +1101,119 @@ export class LivingWorldSystem {
       let shipDistSq = 0;
 
       if (cameraPos) {
-        const dx = s.group.position.x - cameraPos.x;
-        const dz = s.group.position.z - cameraPos.z;
+        const dx = s.x - cameraPos.x;
+        const dz = s.z - cameraPos.z;
         shipDistSq = dx * dx + dz * dz;
       }
       if (cameraFrustum) {
-        _cullSphere.center.copy(s.group.position);
+        _cullSphere.center.set(s.x, OCEAN_LEVEL + 2, s.z);
         _cullSphere.radius = s.isCargo ? 58 : 34;
         shipInView = cameraFrustum.intersectsSphere(_cullSphere);
       }
 
-      s.group.visible = shipInView;
       if (!shipInView) continue;
 
       const bob = Math.sin(elapsed * 1.65 + s.bobPhase) * 0.26 * stormWaveMult;
       const roll = Math.sin(elapsed * 1.25 + s.bobPhase) * 0.055 * stormWaveMult;
       const pitch = Math.cos(elapsed * 1.45 + s.bobPhase) * 0.032 * stormWaveMult;
+      s.y = OCEAN_LEVEL + bob;
 
-      s.group.position.y = OCEAN_LEVEL + bob;
-      s.group.rotation.x = pitch;
-      s.group.rotation.z = roll;
+      _dummy.position.set(s.x, s.y, s.z);
+      _dummy.rotation.set(pitch, s.heading, roll);
+      _dummy.scale.setScalar(s.scale);
+      _dummy.updateMatrix();
+      _shipMat.copy(_dummy.matrix);
 
-      // Hide distant foam wake detail (> 680m) while preserving ship hull & nav lights
-      const showWake = !cameraPos || shipDistSq < 680 * 680;
-      s.wakeMesh.visible = showWake;
-      if (showWake) {
+      if (s.isCargo) {
+        this.cargoShipMesh.visible = true;
+        this.cargoShipMesh.position.set(s.x, s.y, s.z);
+        this.cargoShipMesh.rotation.set(pitch, s.heading, roll);
+      } else {
+        this.boatHullInst.setMatrixAt(boatVisIdx, _shipMat);
+        _tmpColor.setHex(s.hullColor);
+        this.boatHullInst.setColorAt(boatVisIdx, _tmpColor);
+
+        this.boatDeckInst.setMatrixAt(boatVisIdx, _shipMat);
+        _tmpColor.setHex(s.deckColor);
+        this.boatDeckInst.setColorAt(boatVisIdx, _tmpColor);
+
+        this.boatBridgeInst.setMatrixAt(boatVisIdx, _shipMat);
+        _tmpColor.setHex(s.accentColor);
+        this.boatBridgeInst.setColorAt(boatVisIdx, _tmpColor);
+        boatVisIdx++;
+      }
+
+      // Wake plane (only within 680m)
+      if (!cameraPos || shipDistSq < 680 * 680) {
         const wakePulse = 0.92 + Math.sin(elapsed * 3.6 + s.bobPhase) * 0.14;
-        s.wakeMesh.scale.set(wakePulse, 1, 0.94 + Math.cos(elapsed * 2.8 + s.bobPhase) * 0.1);
-        s.wakeMat.opacity = (0.34 + 0.12 * Math.sin(elapsed * 3.1 + s.bobPhase)) * (1 - nightFactor * 0.45);
+        const wakeLenPulse = 0.94 + Math.cos(elapsed * 2.8 + s.bobPhase) * 0.1;
+        _childDummy.position.set(0, 0.18, -s.hullLen * 1.28);
+        _childDummy.rotation.set(0, 0, 0);
+        _childDummy.scale.set(s.hullW * 1.15 * wakePulse, 1, s.hullLen * 1.65 * wakeLenPulse);
+        _childDummy.updateMatrix();
+        _wingMat.multiplyMatrices(_shipMat, _childDummy.matrix);
+        this.shipWakeInst.setMatrixAt(wakeVisIdx++, _wingMat);
+      }
+
+      // Navigation lights (visible at dusk/night/storm)
+      if (showNavLights) {
+        _childDummy.rotation.set(0, 0, 0);
+        _childDummy.scale.set(1, 1, 1);
+
+        _childDummy.position.set(s.hullW * 0.48, s.hullH + 0.6, s.hullLen * 0.25);
+        _childDummy.updateMatrix();
+        _wingMat.multiplyMatrices(_shipMat, _childDummy.matrix);
+        this.shipNavRedInst.setMatrixAt(navVisIdx, _wingMat);
+
+        _childDummy.position.set(-s.hullW * 0.48, s.hullH + 0.6, s.hullLen * 0.25);
+        _childDummy.updateMatrix();
+        _wingMat.multiplyMatrices(_shipMat, _childDummy.matrix);
+        this.shipNavGreenInst.setMatrixAt(navVisIdx, _wingMat);
+
+        _childDummy.position.set(0, s.hullH * 0.9 + s.bridgeH + (s.isCargo ? 1.2 : 3.0), s.bridgeZ);
+        _childDummy.updateMatrix();
+        _wingMat.multiplyMatrices(_shipMat, _childDummy.matrix);
+        this.shipNavWhiteInst.setMatrixAt(navVisIdx, _wingMat);
+        navVisIdx++;
       }
     }
 
-    // 4. Daytime Coastal Seagulls soaring gracefully (paused & hidden when outside camera frustum or > 480m)
+    const hasBoats = boatVisIdx > 0;
+    this.boatHullInst.count = boatVisIdx;
+    this.boatDeckInst.count = boatVisIdx;
+    this.boatBridgeInst.count = boatVisIdx;
+    this.boatHullInst.visible = hasBoats;
+    this.boatDeckInst.visible = hasBoats;
+    this.boatBridgeInst.visible = hasBoats;
+    if (hasBoats) {
+      this.boatHullInst.instanceMatrix.needsUpdate = true;
+      if (this.boatHullInst.instanceColor) this.boatHullInst.instanceColor.needsUpdate = true;
+      this.boatDeckInst.instanceMatrix.needsUpdate = true;
+      if (this.boatDeckInst.instanceColor) this.boatDeckInst.instanceColor.needsUpdate = true;
+      this.boatBridgeInst.instanceMatrix.needsUpdate = true;
+      if (this.boatBridgeInst.instanceColor) this.boatBridgeInst.instanceColor.needsUpdate = true;
+    }
+
+    this.shipWakeInst.count = wakeVisIdx;
+    this.shipWakeInst.visible = wakeVisIdx > 0;
+    if (wakeVisIdx > 0) this.shipWakeInst.instanceMatrix.needsUpdate = true;
+
+    const hasNav = showNavLights && navVisIdx > 0;
+    this.shipNavRedInst.count = navVisIdx;
+    this.shipNavGreenInst.count = navVisIdx;
+    this.shipNavWhiteInst.count = navVisIdx;
+    this.shipNavRedInst.visible = hasNav;
+    this.shipNavGreenInst.visible = hasNav;
+    this.shipNavWhiteInst.visible = hasNav;
+    if (hasNav) {
+      this.shipNavRedInst.instanceMatrix.needsUpdate = true;
+      this.shipNavGreenInst.instanceMatrix.needsUpdate = true;
+      this.shipNavWhiteInst.instanceMatrix.needsUpdate = true;
+    }
+
+    // 4. Daytime Coastal Seagulls (2 InstancedMeshes total, hidden > 480m or outside frustum)
     const showGulls = nightFactor < 0.72 && weather !== 'STORM' && weather !== 'BLIZZARD';
-    this.gullsGroup.visible = showGulls;
+    let gullVisIdx = 0;
     if (showGulls) {
       for (let i = 0; i < this.gulls.length; i++) {
         const g = this.gulls[i];
@@ -1069,50 +1226,73 @@ export class LivingWorldSystem {
           const dx = gx - cameraPos.x;
           const dy = gy - cameraPos.y;
           const dz = gz - cameraPos.z;
-          if (dx * dx + dy * dy + dz * dz > 480 * 480) {
-            g.group.visible = false;
-            continue;
-          }
+          if (dx * dx + dy * dy + dz * dz > 480 * 480) continue;
         }
         if (cameraFrustum) {
           _cullSphere.center.set(gx, gy, gz);
           _cullSphere.radius = 6;
-          if (!cameraFrustum.intersectsSphere(_cullSphere)) {
-            g.group.visible = false;
-            continue;
-          }
+          if (!cameraFrustum.intersectsSphere(_cullSphere)) continue;
         }
 
-        g.group.visible = true;
         const vx = -Math.sin(g.angle) * g.radius * g.angularSpeed;
         const vz = Math.cos(g.angle) * g.radius * g.angularSpeed;
         const heading = Math.atan2(vx, vz);
         const bank = g.angularSpeed > 0 ? -0.26 : 0.26;
 
-        g.group.position.set(gx, gy, gz);
-        g.group.rotation.set(0, heading, bank);
+        _dummy.position.set(gx, gy, gz);
+        _dummy.rotation.set(0, heading, bank);
+        _dummy.scale.set(1, 1, 1);
+        _dummy.updateMatrix();
+        _gullMat.copy(_dummy.matrix);
+        this.gullBodyInst.setMatrixAt(gullVisIdx, _gullMat);
 
         const glideCycle = Math.sin(elapsed * 0.7 + g.flapPhase);
         const flapAmp = glideCycle > -0.15 ? 0.52 : 0.08;
         const flap = Math.sin(elapsed * g.flapSpeed + g.flapPhase) * flapAmp;
-        g.leftWing.rotation.z = flap;
-        g.rightWing.rotation.z = -flap;
+
+        // Left wing (+X)
+        _childDummy.position.set(0.14, 0.06, 0.05);
+        _childDummy.rotation.set(0, 0, flap);
+        _childDummy.scale.set(1, 1, 1);
+        _childDummy.updateMatrix();
+        _wingMat.multiplyMatrices(_gullMat, _childDummy.matrix);
+        this.gullWingInst.setMatrixAt(gullVisIdx * 2, _wingMat);
+
+        // Right wing (-X, mirrored via rotation.y = PI so +X geometry extends along -X)
+        _childDummy.position.set(-0.14, 0.06, 0.05);
+        _childDummy.rotation.set(0, Math.PI, flap);
+        _childDummy.scale.set(1, 1, 1);
+        _childDummy.updateMatrix();
+        _wingMat.multiplyMatrices(_gullMat, _childDummy.matrix);
+        this.gullWingInst.setMatrixAt(gullVisIdx * 2 + 1, _wingMat);
+
+        gullVisIdx++;
       }
+    }
+
+    const hasGulls = gullVisIdx > 0;
+    this.gullBodyInst.count = gullVisIdx;
+    this.gullWingInst.count = gullVisIdx * 2;
+    this.gullBodyInst.visible = hasGulls;
+    this.gullWingInst.visible = hasGulls;
+    if (hasGulls) {
+      this.gullBodyInst.instanceMatrix.needsUpdate = true;
+      this.gullWingInst.instanceMatrix.needsUpdate = true;
     }
   }
 
   public getShipVantageByIndex(index: number, out: THREE.Vector3): boolean {
     const s = this.ships[index];
     if (!s) return false;
-    const sc = s.group.scale.x;
-    const heading = s.group.rotation.y;
+    const sc = s.scale;
+    const heading = s.heading;
     // Place camera on elevated forward bow/bridge deck looking cleanly above deck structures
     const localForward = (s.isCargo ? 6.8 : 4.2) * sc;
     const localUp = (s.isCargo ? 5.8 : 4.1) * sc;
     out.set(
-      s.group.position.x + Math.sin(heading) * localForward,
-      s.group.position.y + localUp,
-      s.group.position.z + Math.cos(heading) * localForward
+      s.x + Math.sin(heading) * localForward,
+      s.y + localUp,
+      s.z + Math.cos(heading) * localForward
     );
     return true;
   }

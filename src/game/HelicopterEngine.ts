@@ -518,7 +518,7 @@ export class HelicopterEngine {
     }
 
     this.renderer = new THREE.WebGLRenderer({
-      antialias: !this.isSoftwareGl && this.graphicsQuality !== 'low',
+      antialias: true,
       powerPreference: 'high-performance',
     });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -526,7 +526,7 @@ export class HelicopterEngine {
     this.renderer.toneMappingExposure = 1.0;
     this.renderer.setPixelRatio(this.getTargetPixelRatio(this.graphicsQuality));
     this.renderer.shadowMap.enabled = !this.isSoftwareGl;
-    this.renderer.shadowMap.type = THREE.PCFShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.setSize(
       container.clientWidth || window.innerWidth,
       container.clientHeight || window.innerHeight
@@ -743,10 +743,10 @@ export class HelicopterEngine {
     this.sunGlowSprite.scale.set(2150, 2150, 1);
     this.scene.add(this.sunGlowSprite);
 
-    // Studio environment map for metallic & glass PBR reflections
+    // Studio environment map for metallic & glass PBR reflections (skyscrapers & AS365 Dauphin)
     const pmremGenerator = new THREE.PMREMGenerator(this.renderer);
     this.scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
-    this.scene.environmentIntensity = 0.38;
+    this.scene.environmentIntensity = 0.48;
     pmremGenerator.dispose();
 
     const aspect =
@@ -761,8 +761,7 @@ export class HelicopterEngine {
     const sunLight = new THREE.DirectionalLight(0xfff5e4, 1.75);
     sunLight.position.set(170, 135, 138);
     sunLight.castShadow = !this.isSoftwareGl;
-    const initShadowRes =
-      this.graphicsQuality === 'ultra' || this.graphicsQuality === 'high' ? 1024 : 512;
+    const initShadowRes = this.graphicsQuality === 'low' ? 1024 : 2048;
     sunLight.shadow.mapSize.width = initShadowRes;
     sunLight.shadow.mapSize.height = initShadowRes;
     const shadowBound = 200;
@@ -771,9 +770,9 @@ export class HelicopterEngine {
     sunLight.shadow.camera.top = shadowBound;
     sunLight.shadow.camera.bottom = -shadowBound;
     sunLight.shadow.camera.near = 20;
-    sunLight.shadow.camera.far = 560;
-    sunLight.shadow.bias = -0.0005;
-    sunLight.shadow.normalBias = 0.045;
+    sunLight.shadow.camera.far = 650;
+    sunLight.shadow.bias = -0.0004;
+    sunLight.shadow.normalBias = 0.04;
     this.scene.add(sunLight);
     this.scene.add(sunLight.target);
     this.sunLight = sunLight;
@@ -805,7 +804,8 @@ export class HelicopterEngine {
     this.colliders = meta.colliders;
     this.minimapData = meta.minimapData;
 
-    this.maxAniso = this.renderer.capabilities.getMaxAnisotropy();
+    const hwAniso = this.renderer.capabilities.getMaxAnisotropy();
+    this.maxAniso = Math.min(Math.max(4, Math.min(hwAniso, 8)), hwAniso);
     this.world = buildCoastalIslandWorld(this.helipads, this.maxAniso, this.companyName);
     this.world.setGraphicsQuality(this.graphicsQuality);
     this.scene.add(this.world.root);
@@ -1109,9 +1109,8 @@ export class HelicopterEngine {
   }
 
   private getTargetPixelRatio(quality: GraphicsQuality): number {
-    if (this.isSoftwareGl || quality === 'low') return 1;
-    if (quality === 'medium') return Math.min(window.devicePixelRatio, 1.2);
-    return Math.min(window.devicePixelRatio, 1.5);
+    if (this.isSoftwareGl || quality === 'low') return 1.0;
+    return Math.max(1.0, Math.min(window.devicePixelRatio || 1, 1.5));
   }
 
   public setGraphicsQuality(quality: GraphicsQuality): void {
@@ -1123,7 +1122,7 @@ export class HelicopterEngine {
       // Ignore storage errors in restricted iframes
     }
     const useShadows = !this.isSoftwareGl;
-    const targetShadowRes = quality === 'ultra' || quality === 'high' ? 1024 : 512;
+    const targetShadowRes = quality === 'low' ? 1024 : 2048;
     if (this.sunLight.shadow.mapSize.width !== targetShadowRes) {
       this.sunLight.shadow.mapSize.set(targetShadowRes, targetShadowRes);
       if (this.sunLight.shadow.map) {
@@ -1904,8 +1903,8 @@ export class HelicopterEngine {
     const sunXOff = _vecSunDir.x * lightOrbitDist;
     const sunElev = Math.max(24, _vecSunDir.y * lightOrbitDist);
     const sunZOff = _vecSunDir.z * lightOrbitDist;
-    // Snap shadow camera target to texel grid (~0.8m) to prevent shadow swimming while keeping 200m frustum centered on player
-    const shadowSnap = 0.8;
+    // Snap shadow camera target to 2048px texel grid (~0.2m for 400m span) to prevent shadow swimming
+    const shadowSnap = 0.2;
     const snapX = Math.round(this.pos.x / shadowSnap) * shadowSnap;
     const snapZ = Math.round(this.pos.z / shadowSnap) * shadowSnap;
     this.sunLight.position.set(snapX + sunXOff, this.pos.y + sunElev, snapZ + sunZOff);

@@ -260,7 +260,7 @@ export class SlingLoadSystem {
 
     const body = new THREE.Mesh(this.trackGeo(new THREE.BoxGeometry(2.8, 2.0, 2.8)), crateMat);
     body.position.y = 1.05;
-    body.castShadow = true;
+    body.castShadow = false;
     body.receiveShadow = true;
     this.cargoGroup.add(body);
 

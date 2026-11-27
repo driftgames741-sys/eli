@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { createDauphinAS365Rig } from './DauphinModel';
+import { createDauphinAS365Rig, mergeStaticGroupByMaterial } from './DauphinModel';
 import { createLandingMarkerTexture, createRotorBlurTexture } from './ProceduralTextures';
 import type { HelicopterId } from './types';
 
@@ -1061,6 +1061,49 @@ export function createHelicopterRig(
   landingMarker.rotation.x = -Math.PI / 2;
   landingMarker.renderOrder = 6;
 
+  // Batch static sub-meshes by material (restricting shadows to merged primary hull & main blades only)
+  const cockpitExternalGroup = new THREE.Group();
+  bodyGroup.add(cockpitExternalGroup);
+  for (let i = 0; i < cockpitHideOnFirstPerson.length; i++) {
+    cockpitExternalGroup.add(cockpitHideOnFirstPerson[i]);
+  }
+  const noShadows = new Set<THREE.Material>();
+  mergeStaticGroupByMaterial(cockpitExternalGroup, new Set(), trackGeo, noShadows);
+  mergeStaticGroupByMaterial(cockpitDashGroup, new Set(), trackGeo, noShadows);
+  mergeStaticGroupByMaterial(
+    mainRotorGroup,
+    new Set<THREE.Object3D>([mainRotorBlur]),
+    trackGeo,
+    new Set<THREE.Material>([bladeMat])
+  );
+  mergeStaticGroupByMaterial(
+    tailRotorGroup,
+    new Set<THREE.Object3D>([tailRotorBlur]),
+    trackGeo,
+    noShadows
+  );
+  mergeStaticGroupByMaterial(
+    bucketPivot,
+    new Set<THREE.Object3D>([bucketWaterMesh]),
+    trackGeo,
+    noShadows
+  );
+  mergeStaticGroupByMaterial(
+    bodyGroup,
+    new Set<THREE.Object3D>([
+      mainRotorGroup,
+      tailRotorGroup,
+      cockpitDashGroup,
+      cockpitExternalGroup,
+      searchlightGimbal,
+      beaconLightMesh,
+    ]),
+    trackGeo,
+    new Set<THREE.Material>([primaryMat])
+  );
+  searchlightGimbal.traverse((o) => { if (o instanceof THREE.Mesh) o.castShadow = false; });
+  beaconLightMesh.castShadow = false;
+
   return {
     helicopterId,
     hasIntegratedTank: spec.hasIntegratedTank,
@@ -1096,9 +1139,7 @@ export function createHelicopterRig(
     },
     setCockpitView: (active) => {
       cockpitDashGroup.visible = active;
-      for (let i = 0; i < cockpitHideOnFirstPerson.length; i++) {
-        cockpitHideOnFirstPerson[i].visible = !active;
-      }
+      cockpitExternalGroup.visible = !active;
     },
     dispose: () => {
       geometries.forEach((g) => g.dispose());
@@ -1537,6 +1578,24 @@ export function createAIHelicopterRig(
   tailRotorBlur.rotation.y = Math.PI / 2;
   tailRotorBlur.position.x = 0.09;
   tailRotorGroup.add(tailRotorBlur);
+
+  // Batch AI helicopter static meshes & disable ALL shadows (only player helicopter casts shadows)
+  const aiNoShadows = new Set<THREE.Material>();
+  mergeStaticGroupByMaterial(
+    mainRotorGroup,
+    new Set<THREE.Object3D>([mainRotorBlur]),
+    trackGeo,
+    aiNoShadows
+  );
+  mergeStaticGroupByMaterial(
+    bodyGroup,
+    new Set<THREE.Object3D>([mainRotorGroup, tailRotorGroup]),
+    trackGeo,
+    aiNoShadows
+  );
+  root.traverse((o) => {
+    if (o instanceof THREE.Mesh) o.castShadow = false;
+  });
 
   return {
     variant,

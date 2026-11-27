@@ -1,6 +1,152 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { createLandingMarkerTexture, createRotorBlurTexture } from './ProceduralTextures';
 import { BAMBI_CABLE_LENGTH, SEARCHLIGHT_SPOT_ANGLE, type HelicopterRig } from './HelicopterModel';
+
+/**
+ * Merges static sibling/descendant THREE.Mesh nodes inside `container` that share the exact same
+ * Material & renderOrder into a single BufferGeometry per material, eliminating redundant draw calls
+ * while preserving PBR materials, decals, animations, and livery color updates 100% intact.
+ */
+export function mergeStaticGroupByMaterial(
+  container: THREE.Group,
+  excludeSubtrees: Set<THREE.Object3D>,
+  trackGeo: <T extends THREE.BufferGeometry>(g: T) => T,
+  shadowMaterials: Set<THREE.Material>
+): void {
+  container.updateWorldMatrix(true, true);
+  const invContainer = container.matrixWorld.clone().invert();
+  const relMat = new THREE.Matrix4();
+
+  interface Bucket {
+    material: THREE.Material;
+    renderOrder: number;
+    meshes: THREE.Mesh[];
+    receiveShadow: boolean;
+  }
+
+  const buckets = new Map<string, Bucket>();
+
+  const collect = (node: THREE.Object3D): void => {
+    for (let i = 0; i < node.children.length; i++) {
+      const child = node.children[i];
+      if (excludeSubtrees.has(child)) continue;
+
+      if (child instanceof THREE.Mesh && !(child instanceof THREE.InstancedMesh)) {
+        const mat = child.material;
+        if (!Array.isArray(mat)) {
+          const key = `${mat.uuid}|${child.renderOrder}`;
+          let bucket = buckets.get(key);
+          if (!bucket) {
+            bucket = {
+              material: mat,
+              renderOrder: child.renderOrder,
+              meshes: [],
+              receiveShadow: false,
+            };
+            buckets.set(key, bucket);
+          }
+          bucket.meshes.push(child);
+          if (child.receiveShadow) bucket.receiveShadow = true;
+        }
+      }
+      if (child.children.length > 0) {
+        collect(child);
+      }
+    }
+  };
+
+  collect(container);
+
+  for (const bucket of buckets.values()) {
+    const { material, renderOrder, meshes, receiveShadow } = bucket;
+    const castShadow = shadowMaterials.has(material);
+
+    if (meshes.length === 1) {
+      meshes[0].castShadow = castShadow;
+      meshes[0].frustumCulled = true;
+      continue;
+    }
+
+    const needsUV = 'map' in material && Boolean((material as THREE.MeshStandardMaterial).map);
+    const preparedGeos: THREE.BufferGeometry[] = [];
+    let mergeOk = true;
+
+    for (let i = 0; i < meshes.length; i++) {
+      const mesh = meshes[i];
+      const src = mesh.geometry;
+      if (!src || !src.getAttribute('position')) {
+        mergeOk = false;
+        break;
+      }
+      const g = src.index ? src.toNonIndexed() : src.clone();
+
+      // Normalize attributes so mergeGeometries never fails on mismatched optional attributes
+      for (const attrName of Object.keys(g.attributes)) {
+        if (attrName === 'position' || attrName === 'normal') continue;
+        if (attrName === 'uv' && needsUV) continue;
+        g.deleteAttribute(attrName);
+      }
+      if (needsUV && !g.getAttribute('uv')) {
+        const vCount = g.getAttribute('position').count;
+        g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(vCount * 2), 2));
+      }
+
+      relMat.multiplyMatrices(invContainer, mesh.matrixWorld);
+      g.applyMatrix4(relMat);
+
+      // Preserve outward triangle winding if transform mirrored handedness
+      if (relMat.determinant() < 0) {
+        const pos = g.getAttribute('position');
+        for (let k = 0; k < pos.count; k += 3) {
+          const x1 = pos.getX(k + 1), y1 = pos.getY(k + 1), z1 = pos.getZ(k + 1);
+          pos.setXYZ(k + 1, pos.getX(k + 2), pos.getY(k + 2), pos.getZ(k + 2));
+          pos.setXYZ(k + 2, x1, y1, z1);
+        }
+        pos.needsUpdate = true;
+        if (needsUV) {
+          const uv = g.getAttribute('uv');
+          for (let k = 0; k < uv.count; k += 3) {
+            const u1 = uv.getX(k + 1), v1 = uv.getY(k + 1);
+            uv.setXY(k + 1, uv.getX(k + 2), uv.getY(k + 2));
+            uv.setXY(k + 2, u1, v1);
+          }
+          uv.needsUpdate = true;
+        }
+        g.computeVertexNormals();
+      } else if (!g.getAttribute('normal')) {
+        g.computeVertexNormals();
+      }
+
+      preparedGeos.push(g);
+    }
+
+    if (!mergeOk || preparedGeos.length === 0) {
+      for (const pg of preparedGeos) pg.dispose();
+      for (const m of meshes) m.castShadow = castShadow;
+      continue;
+    }
+
+    const merged = mergeGeometries(preparedGeos, false);
+    for (const pg of preparedGeos) pg.dispose();
+
+    if (!merged) {
+      for (const m of meshes) m.castShadow = castShadow;
+      continue;
+    }
+
+    for (let i = 0; i < meshes.length; i++) {
+      meshes[i].parent?.remove(meshes[i]);
+    }
+
+    const mergedMesh = new THREE.Mesh(trackGeo(merged), material);
+    mergedMesh.renderOrder = renderOrder;
+    mergedMesh.castShadow = castShadow;
+    mergedMesh.receiveShadow = receiveShadow;
+    mergedMesh.frustumCulled = true;
+    container.add(mergedMesh);
+  }
+}
 
 interface LoftStation {
   z: number;
@@ -1865,6 +2011,71 @@ export function createDauphinAS365Rig(maxAnisotropy: number): HelicopterRig {
   landingMarker.rotation.x = -Math.PI / 2;
   landingMarker.renderOrder = 6;
 
+  // === 12. STATIC PBR MATERIAL BATCHING (91 meshes + 15 shadows -> ~22 meshes + 2 shadows) ===
+  // Move cockpit-first-person-hidden exterior meshes into one dedicated group & batch them cleanly
+  const cockpitExternalGroup = new THREE.Group();
+  bodyGroup.add(cockpitExternalGroup);
+  for (let i = 0; i < cockpitHideOnFirstPerson.length; i++) {
+    cockpitExternalGroup.add(cockpitHideOnFirstPerson[i]);
+  }
+  const noShadows = new Set<THREE.Material>();
+  mergeStaticGroupByMaterial(cockpitExternalGroup, new Set(), trackGeo, noShadows);
+  mergeStaticGroupByMaterial(cockpitDashGroup, new Set(), trackGeo, noShadows);
+
+  // Batch landing gear assemblies internally so gear deploy/retract animation stays 100% smooth
+  mergeStaticGroupByMaterial(noseGearPivot, new Set(), trackGeo, noShadows);
+  for (let i = 0; i < mainGearPivots.length; i++) {
+    mergeStaticGroupByMaterial(mainGearPivots[i].pivot, new Set(), trackGeo, noShadows);
+  }
+
+  // Batch spinning rotors while keeping motion-blur discs separate
+  mergeStaticGroupByMaterial(
+    mainRotorGroup,
+    new Set<THREE.Object3D>([mainRotorBlur]),
+    trackGeo,
+    new Set<THREE.Material>([bladeMat])
+  );
+  mergeStaticGroupByMaterial(
+    tailRotorGroup,
+    new Set<THREE.Object3D>([tailRotorBlur]),
+    trackGeo,
+    noShadows
+  );
+
+  // Batch Bambi Bucket static cables/straps/rim/body while keeping bucketWaterMesh separate
+  mergeStaticGroupByMaterial(
+    bucketPivot,
+    new Set<THREE.Object3D>([bucketWaterMesh]),
+    trackGeo,
+    noShadows
+  );
+
+  // Batch all remaining static fuselage, cowling, sponson, tail, Fenestron, hoist & antenna meshes
+  // Restrict shadow casting ONLY to the merged primary crimson hull/tail/fin mesh (1 shadow call!)
+  const bodyExcludes = new Set<THREE.Object3D>([
+    mainRotorGroup,
+    tailRotorGroup,
+    cockpitDashGroup,
+    cockpitExternalGroup,
+    noseGearPivot,
+    searchlightGimbal,
+    beaconLightMesh,
+    ...noseDoors,
+    ...mainGearPivots.map((m) => m.pivot),
+    ...mainGearPivots.map((m) => m.door),
+  ]);
+  mergeStaticGroupByMaterial(
+    bodyGroup,
+    bodyExcludes,
+    trackGeo,
+    new Set<THREE.Material>([primaryMat])
+  );
+  // Ensure animated doors/searchlight/beacon never emit extra shadow draw calls
+  for (const d of noseDoors) d.traverse((o) => { if (o instanceof THREE.Mesh) o.castShadow = false; });
+  for (const m of mainGearPivots) m.door.traverse((o) => { if (o instanceof THREE.Mesh) o.castShadow = false; });
+  searchlightGimbal.traverse((o) => { if (o instanceof THREE.Mesh) o.castShadow = false; });
+  beaconLightMesh.castShadow = false;
+
   return {
     helicopterId: 'wren',
     hasIntegratedTank: false,
@@ -1911,9 +2122,7 @@ export function createDauphinAS365Rig(maxAnisotropy: number): HelicopterRig {
     },
     setCockpitView: (active) => {
       cockpitDashGroup.visible = active;
-      for (let i = 0; i < cockpitHideOnFirstPerson.length; i++) {
-        cockpitHideOnFirstPerson[i].visible = !active;
-      }
+      cockpitExternalGroup.visible = !active;
     },
     dispose: () => {
       geometries.forEach((g) => g.dispose());

@@ -695,6 +695,7 @@ export function buildCoastalIslandWorld(
     );
   };
 
+  const mergedRiverGeos: THREE.BufferGeometry[] = [];
   for (const river of FOREST_RIVERS) {
     const pts = river.points;
     const halfW = river.width * 0.64; // slightly wider than carved bed so water tucks seamlessly into banks
@@ -726,12 +727,18 @@ export function buildCoastalIslandWorld(
         rIndices.push(v0, v1, v0 + 2, v1, v1 + 2, v0 + 2);
       }
     }
-    const riverGeo = trackGeo(new THREE.BufferGeometry());
+    const riverGeo = new THREE.BufferGeometry();
     riverGeo.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
     riverGeo.setIndex(rIndices);
     riverGeo.computeVertexNormals();
-    const riverMesh = new THREE.Mesh(riverGeo, riverMat);
+    mergedRiverGeos.push(riverGeo);
+  }
+  const allRiversGeo = mergeNormalizedGeos(mergedRiverGeos);
+  let riverMesh: THREE.Mesh | null = null;
+  if (allRiversGeo) {
+    riverMesh = new THREE.Mesh(allRiversGeo, riverMat);
     riverMesh.receiveShadow = true;
+    riverMesh.castShadow = false;
     root.add(riverMesh);
   }
 
@@ -1631,7 +1638,7 @@ export function buildCoastalIslandWorld(
     })
   );
 
-  // Split streetlamps into 2x2 urban spatial quadrants so distant/out-of-view lamps cull aggressively
+  // Single global InstancedMesh per streetlamp part (12 quadrant calls -> 3 calls total; only 1 in daylight!)
   const urbanMidX = (URBAN_BOUNDS.minX + URBAN_BOUNDS.maxX) * 0.5;
   const urbanMidZ = (URBAN_BOUNDS.minZ + URBAN_BOUNDS.maxZ) * 0.5;
   const getCityQuadIdx = (x: number, z: number): number =>
@@ -1642,55 +1649,44 @@ export function buildCoastalIslandWorld(
     poleGeo.translate(0, 3.2, 0);
     const bulbGeo = trackGeo(new THREE.SphereGeometry(0.42, 7, 7));
     bulbGeo.translate(0, 6.45, 0);
-    const poolGeo = trackGeo(new THREE.CircleGeometry(4.6, 14));
+    const poolGeo = trackGeo(new THREE.CircleGeometry(4.6, 12));
     poolGeo.rotateX(-Math.PI / 2);
 
-    const lampQuads: Array<Array<{ x: number; z: number; rotY: number }>> = [[], [], [], []];
-    for (let i = 0; i < streetLampPositions.length; i++) {
-      const lp = streetLampPositions[i];
-      lampQuads[getCityQuadIdx(lp.x, lp.z)].push(lp);
+    const lampDummy = new THREE.Object3D();
+    const poleInst = new THREE.InstancedMesh(poleGeo, lampPoleMat, lampCount);
+    const bulbInst = new THREE.InstancedMesh(bulbGeo, lampBulbMat, lampCount);
+    const poolInst = new THREE.InstancedMesh(poolGeo, lampGlowPoolMat, lampCount);
+
+    for (let idx = 0; idx < lampCount; idx++) {
+      const lp = streetLampPositions[idx];
+      lampDummy.position.set(lp.x, urbanY - 0.02, lp.z);
+      lampDummy.rotation.set(0, lp.rotY, 0);
+      lampDummy.scale.setScalar(1);
+      lampDummy.updateMatrix();
+      poleInst.setMatrixAt(idx, lampDummy.matrix);
+      bulbInst.setMatrixAt(idx, lampDummy.matrix);
+
+      lampDummy.position.set(lp.x, urbanY + 0.07, lp.z);
+      lampDummy.rotation.set(0, 0, 0);
+      lampDummy.updateMatrix();
+      poolInst.setMatrixAt(idx, lampDummy.matrix);
     }
 
-    const lampDummy = new THREE.Object3D();
-    for (let q = 0; q < 4; q++) {
-      const qLamps = lampQuads[q];
-      if (qLamps.length === 0) continue;
+    poleInst.instanceMatrix.needsUpdate = true;
+    bulbInst.instanceMatrix.needsUpdate = true;
+    poolInst.instanceMatrix.needsUpdate = true;
+    poleInst.castShadow = false;
+    bulbInst.castShadow = false;
+    poolInst.castShadow = false;
+    poleInst.computeBoundingSphere();
+    bulbInst.computeBoundingSphere();
+    poolInst.computeBoundingSphere();
+    root.add(poleInst, bulbInst, poolInst);
 
-      const poleInst = new THREE.InstancedMesh(poleGeo, lampPoleMat, qLamps.length);
-      const bulbInst = new THREE.InstancedMesh(bulbGeo, lampBulbMat, qLamps.length);
-      const poolInst = new THREE.InstancedMesh(poolGeo, lampGlowPoolMat, qLamps.length);
-
-      qLamps.forEach((lp, idx) => {
-        lampDummy.position.set(lp.x, urbanY - 0.02, lp.z);
-        lampDummy.rotation.set(0, lp.rotY, 0);
-        lampDummy.scale.setScalar(1);
-        lampDummy.updateMatrix();
-        poleInst.setMatrixAt(idx, lampDummy.matrix);
-        bulbInst.setMatrixAt(idx, lampDummy.matrix);
-
-        lampDummy.position.set(lp.x, urbanY + 0.07, lp.z);
-        lampDummy.rotation.set(0, 0, 0);
-        lampDummy.updateMatrix();
-        poolInst.setMatrixAt(idx, lampDummy.matrix);
-      });
-
-      poleInst.instanceMatrix.needsUpdate = true;
-      bulbInst.instanceMatrix.needsUpdate = true;
-      poolInst.instanceMatrix.needsUpdate = true;
-      poleInst.castShadow = false;
-      bulbInst.castShadow = false;
-      poolInst.castShadow = false;
-      poleInst.computeBoundingSphere();
-      bulbInst.computeBoundingSphere();
-      poolInst.computeBoundingSphere();
-      root.add(poleInst, bulbInst, poolInst);
-
-      if (poleInst.boundingSphere) {
-        spatialLOD.addDetailLayer(poleInst, poleInst.boundingSphere.clone(), 540, 450);
-        // Night bulbs & light pools stay off during clear daylight (0 draw cost!) and glow up to 620m at night
-        spatialLOD.addDetailLayer(bulbInst, poleInst.boundingSphere.clone(), 620, 480, true);
-        spatialLOD.addDetailLayer(poolInst, poleInst.boundingSphere.clone(), 540, 450, true);
-      }
+    if (poleInst.boundingSphere) {
+      spatialLOD.addDetailLayer(poleInst, poleInst.boundingSphere.clone(), 540, 450);
+      spatialLOD.addDetailLayer(bulbInst, poleInst.boundingSphere.clone(), 620, 480, true);
+      spatialLOD.addDetailLayer(poolInst, poleInst.boundingSphere.clone(), 540, 450, true);
     }
   }
 
@@ -1715,38 +1711,46 @@ export function buildCoastalIslandWorld(
     })
   );
 
-  // Create EXACTLY 4 shared opaque MeshLambertMaterial facade sets OUTSIDE the building loop (0 CanvasTexture in loops!)
-  // Per-building vertex colors preserve every building's distinct architecture while collapsing ~80 draw calls -> 4!
+  // Create EXACTLY 4 shared opaque MeshStandardMaterial facade sets OUTSIDE the building loop (512x512 textures + roughnessMap!)
+  // Per-building vertex colors preserve every building's distinct architecture while keeping all city facades in 4 draw calls!
   type FacadeBucketKey = 'office' | 'residential' | 'hospital' | 'tower';
   const makeSharedFacadeMat = (
     baseHex: string,
     winHex: string,
     accentHex: string,
     style: FacadeBucketKey,
-    seed: number
-  ): THREE.MeshLambertMaterial => {
+    seed: number,
+    metalness: number,
+    envMapIntensity: number
+  ): THREE.MeshStandardMaterial => {
     const pair = createFacadeTextures(maxAnisotropy, baseHex, winHex, accentHex, style, seed);
     trackTex(pair.map);
     trackTex(pair.emissiveMap);
+    trackTex(pair.roughnessMap);
     const mat = trackMat(
-      new THREE.MeshLambertMaterial({
+      new THREE.MeshStandardMaterial({
         map: pair.map,
         emissiveMap: pair.emissiveMap,
+        roughnessMap: pair.roughnessMap,
+        roughness: 1.0,
+        metalness,
+        envMapIntensity,
         emissive: new THREE.Color(0xffffff),
         emissiveIntensity: 0,
         vertexColors: true,
         transparent: false,
+        shadowSide: THREE.DoubleSide,
       })
     );
     nightWindowMats.push(mat);
     return mat;
   };
 
-  const sharedFacadeMats: Record<FacadeBucketKey, THREE.MeshLambertMaterial> = {
-    office: makeSharedFacadeMat('#e6ebf2', '#47627a', '#cbd5e1', 'office', 1),
-    residential: makeSharedFacadeMat('#eceae4', '#475569', '#d2cdc2', 'residential', 2),
-    hospital: makeSharedFacadeMat('#f1f5f9', '#7ab6e8', '#cbd5e1', 'hospital', 3),
-    tower: makeSharedFacadeMat('#dde8f4', '#38bdf8', '#9eb6cf', 'tower', 4),
+  const sharedFacadeMats: Record<FacadeBucketKey, THREE.MeshStandardMaterial> = {
+    office: makeSharedFacadeMat('#e6ebf2', '#47627a', '#cbd5e1', 'office', 1, 0.42, 1.15),
+    residential: makeSharedFacadeMat('#eceae4', '#475569', '#d2cdc2', 'residential', 2, 0.18, 0.9),
+    hospital: makeSharedFacadeMat('#f1f5f9', '#7ab6e8', '#cbd5e1', 'hospital', 3, 0.28, 1.0),
+    tower: makeSharedFacadeMat('#dde8f4', '#38bdf8', '#9eb6cf', 'tower', 4, 0.58, 1.35),
   };
   const facadeBuckets: Record<FacadeBucketKey, THREE.BufferGeometry[]> = {
     office: [],
@@ -2033,19 +2037,19 @@ export function buildCoastalIslandWorld(
     }
   });
 
-  // Finalize the 4 shared Lambert building facade meshes (ONLY giant downtown skyscrapers cast shadows in High/Ultra!)
-  let giantSkyscraperMesh: THREE.Mesh | null = null;
+  // Finalize the 4 shared PBR building facade meshes (4 draw calls total, castShadow = true for crisp skyline depth!)
+  const cityFixedMeshes = new Set<THREE.Object3D>();
+  const cityShadowCasters = new Set<THREE.Object3D>();
   (['office', 'residential', 'hospital', 'tower'] as const).forEach((key) => {
     const merged = mergeNormalizedGeos(facadeBuckets[key], true);
     if (!merged) return;
     const mesh = new THREE.Mesh(merged, sharedFacadeMats[key]);
-    mesh.castShadow = key === 'tower';
+    mesh.castShadow = true;
     mesh.receiveShadow = true;
     root.add(mesh);
     raycastTargets.push(mesh);
-    if (key === 'tower') {
-      giantSkyscraperMesh = mesh;
-    }
+    cityFixedMeshes.add(mesh);
+    cityShadowCasters.add(mesh);
   });
 
   // 1 single draw call for ALL building podiums, roof caps, crowns, spires, Central Park & Arena Central Stadium!
@@ -2056,6 +2060,7 @@ export function buildCoastalIslandWorld(
     citySolidsMesh.receiveShadow = true;
     root.add(citySolidsMesh);
     raycastTargets.push(citySolidsMesh);
+    cityFixedMeshes.add(citySolidsMesh);
   }
 
   const mergedStdPads = mergeNormalizedGeos(cityPadStdGeos);
@@ -2065,6 +2070,7 @@ export function buildCoastalIslandWorld(
     m.castShadow = false;
     root.add(m);
     raycastTargets.push(m);
+    cityFixedMeshes.add(m);
   }
   const mergedHospPads = mergeNormalizedGeos(cityPadHospGeos);
   if (mergedHospPads) {
@@ -2073,24 +2079,32 @@ export function buildCoastalIslandWorld(
     m.castShadow = false;
     root.add(m);
     raycastTargets.push(m);
+    cityFixedMeshes.add(m);
   }
   const mergedCityEmissives = mergeNormalizedGeos(cityEmissiveGeos);
   if (mergedCityEmissives) {
     const m = new THREE.Mesh(mergedCityEmissives, stadiumFloodMat);
     m.castShadow = false;
     root.add(m);
+    cityFixedMeshes.add(m);
   }
 
-  // 4 spatial quadrant micro-detail meshes (1 Lambert draw call per quadrant, hidden > 450m–540m)
-  for (let q = 0; q < 4; q++) {
-    const merged = mergeNormalizedGeos(quadMicroDetailGeos[q], true);
-    if (!merged) continue;
-    const m = new THREE.Mesh(merged, vertexColorLambertMat);
+  // Collapse all 4 rooftop micro-detail quadrants into 1 single draw call (hidden > 450m–540m)
+  const allMicroDetailGeos: THREE.BufferGeometry[] = [
+    ...quadMicroDetailGeos[0],
+    ...quadMicroDetailGeos[1],
+    ...quadMicroDetailGeos[2],
+    ...quadMicroDetailGeos[3],
+  ];
+  const mergedCityMicroDetails = mergeNormalizedGeos(allMicroDetailGeos, true);
+  if (mergedCityMicroDetails) {
+    const m = new THREE.Mesh(mergedCityMicroDetails, vertexColorLambertMat);
     m.castShadow = false;
     m.receiveShadow = true;
     root.add(m);
-    if (merged.boundingSphere) {
-      spatialLOD.addDetailLayer(m, merged.boundingSphere.clone(), 540, 450);
+    cityFixedMeshes.add(m);
+    if (mergedCityMicroDetails.boundingSphere) {
+      spatialLOD.addDetailLayer(m, mergedCityMicroDetails.boundingSphere.clone(), 540, 450);
     }
   }
 
@@ -2730,32 +2744,30 @@ export function buildCoastalIslandWorld(
     }
   }
 
-  const liftGondolas: Array<{ group: THREE.Group; phase: number; side: number }> = [];
+  // 14 Animated Ski Lift Gondolas rendered via 2 InstancedMeshes (28 meshes + 14 shadows -> 2 calls!)
+  const liftGondolas: Array<{ phase: number; side: number }> = [];
+  const gondolaHangerGeo = trackGeo(new THREE.CylinderGeometry(0.06, 0.06, 1.5, 5));
+  gondolaHangerGeo.translate(0, -0.75, 0);
+  const gondolaCabinGeo = trackGeo(new THREE.BoxGeometry(1.5, 1.5, 1.9));
+  gondolaCabinGeo.translate(0, -2.1, 0);
+  const gondolaCabinMat = trackMat(new THREE.MeshLambertMaterial({ color: 0xffffff }));
+  const gondolaHangerInst = new THREE.InstancedMesh(gondolaHangerGeo, liftSteelMat, 14);
+  const gondolaCabinInst = new THREE.InstancedMesh(gondolaCabinGeo, gondolaCabinMat, 14);
+  gondolaHangerInst.castShadow = false;
+  gondolaCabinInst.castShadow = false;
+  gondolaHangerInst.frustumCulled = false;
+  gondolaCabinInst.frustumCulled = false;
+  const gondolaCol = new THREE.Color();
   for (let i = 0; i < 14; i++) {
-    const gGroup = new THREE.Group();
-    const hanger = new THREE.Mesh(
-      trackGeo(new THREE.CylinderGeometry(0.06, 0.06, 1.5, 5)),
-      liftSteelMat
-    );
-    hanger.position.y = -0.75;
-    gGroup.add(hanger);
-
-    const cabin = new THREE.Mesh(
-      trackGeo(new THREE.BoxGeometry(1.5, 1.5, 1.9)),
-      i % 2 === 0 ? gondolaRedMat : gondolaYellowMat
-    );
-    cabin.position.y = -2.1;
-    cabin.castShadow = true;
-    gGroup.add(cabin);
-
-    gGroup.rotation.y = liftYaw;
-    root.add(gGroup);
+    gondolaCol.setHex(i % 2 === 0 ? 0xd93542 : 0xeab308);
+    gondolaCabinInst.setColorAt(i, gondolaCol);
     liftGondolas.push({
-      group: gGroup,
       phase: (i % 7) / 7,
       side: i < 7 ? 1 : -1,
     });
   }
+  if (gondolaCabinInst.instanceColor) gondolaCabinInst.instanceColor.needsUpdate = true;
+  root.add(gondolaHangerInst, gondolaCabinInst);
 
   // Summit Radar & Antenna Station atop East Alpine Horn (RADAR_PEAK_POS)
   const radarPeakY = getTerrainHeight(RADAR_PEAK_POS.x, RADAR_PEAK_POS.z);
@@ -3039,62 +3051,81 @@ export function buildCoastalIslandWorld(
   solarGroup.add(sStandInst, sPanelInst);
   root.add(solarGroup);
 
-  // Wind Farm ("Parque Eólico") — 5 Giant White Rotating Wind Turbines with Frustum Culling Spheres
-  const turbineWhiteMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0xe6edf5, roughness: 0.82, metalness: 0.04 })
-  );
+  // Wind Farm ("Parque Eólico") — Static towers merged + ALL spinning rotors in 1 single InstancedMesh!
+  const turbineWhiteMat = trackMat(new THREE.MeshLambertMaterial({ color: 0xe6edf5 }));
   const turbineTowerGeo = trackGeo(new THREE.CylinderGeometry(0.95, 1.95, 44, 10));
   const turbineNacelleGeo = trackGeo(new THREE.BoxGeometry(2.6, 2.4, 6.2));
-  const turbineBladeGeo = trackGeo(new THREE.BoxGeometry(1.15, 18.5, 0.34));
-  turbineBladeGeo.translate(0, 9.25, 0);
+  // Merge nose cone + 3 blades into ONE vertex-colored rotor geometry -> 1 single InstancedMesh for ALL turbines!
+  const rotorParts: THREE.BufferGeometry[] = [];
+  pushTransformedGeo(rotorParts, new THREE.ConeGeometry(1.1, 2.4, 8), 0, 0, 0.8, Math.PI / 2, 0, 0, 1, 1, 1, 0xc2382c);
+  for (let b = 0; b < 3; b++) {
+    const bGeo = new THREE.BoxGeometry(1.15, 18.5, 0.34);
+    bGeo.translate(0, 9.25, 0);
+    pushTransformedGeo(rotorParts, bGeo, 0, 0, 0, 0, 0, (b / 3) * Math.PI * 2, 1, 1, 1, 0xe6edf5);
+  }
+  const mergedTurbineRotorGeo = mergeNormalizedGeos(rotorParts, true)!;
+  const windRotorInst = new THREE.InstancedMesh(
+    mergedTurbineRotorGeo,
+    vertexColorLambertMat,
+    WIND_TURBINES.length
+  );
+  windRotorInst.castShadow = false;
+  windRotorInst.frustumCulled = false;
 
-  const windTurbineRotors: Array<{ hub: THREE.Group; speedMult: number; sphere: THREE.Sphere }> = [];
+  const windTurbineRotors: Array<{
+    hubPos: THREE.Vector3;
+    yaw: number;
+    roll: number;
+    speedMult: number;
+    sphere: THREE.Sphere;
+  }> = [];
+  const wtDummy = new THREE.Object3D();
   WIND_TURBINES.forEach((wt, idx) => {
     const wy = getTerrainHeight(wt.x, wt.z);
+    const yaw = 0.72 + (idx % 3) * 0.06;
     const tg = new THREE.Group();
     tg.position.set(wt.x, wy - 0.5, wt.z);
-    tg.rotation.y = 0.72 + (idx % 3) * 0.06;
+    tg.rotation.y = yaw;
 
     const tower = new THREE.Mesh(turbineTowerGeo, turbineWhiteMat);
     tower.position.y = 22;
-    tower.castShadow = true;
-    tower.receiveShadow = true;
     tg.add(tower);
     raycastTargets.push(tower);
 
     const nacelle = new THREE.Mesh(turbineNacelleGeo, turbineWhiteMat);
     nacelle.position.set(0, 44.6, 0.5);
-    nacelle.castShadow = true;
     tg.add(nacelle);
+    root.add(tg);
 
-    const tBeacon = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.52, 8, 8)), skyRedBeaconMat);
-    tBeacon.position.set(0, 46.3, -1.6);
-    tg.add(tBeacon);
+    skyRedBeaconCoords.push({
+      x: wt.x - Math.sin(yaw) * 1.6,
+      y: wy - 0.5 + 46.3,
+      z: wt.z - Math.cos(yaw) * 1.6,
+      r: 0.52,
+    });
 
-    const hub = new THREE.Group();
-    hub.position.set(0, 44.6, 3.8);
-    const noseCone = new THREE.Mesh(trackGeo(new THREE.ConeGeometry(1.1, 2.4, 8)), craneRedMat);
-    noseCone.rotation.x = Math.PI / 2;
-    noseCone.position.z = 0.8;
-    hub.add(noseCone);
+    const hubPos = new THREE.Vector3(
+      wt.x + Math.sin(yaw) * 3.8,
+      wy - 0.5 + 44.6,
+      wt.z + Math.cos(yaw) * 3.8
+    );
+    const initRoll = idx * 1.15;
+    wtDummy.position.copy(hubPos);
+    wtDummy.rotation.set(0, yaw, initRoll, 'YXZ');
+    wtDummy.scale.setScalar(1);
+    wtDummy.updateMatrix();
+    windRotorInst.setMatrixAt(idx, wtDummy.matrix);
 
-    for (let b = 0; b < 3; b++) {
-      const bladeWrap = new THREE.Group();
-      bladeWrap.rotation.z = (b / 3) * Math.PI * 2;
-      const blade = new THREE.Mesh(turbineBladeGeo, turbineWhiteMat);
-      blade.castShadow = true;
-      bladeWrap.add(blade);
-      hub.add(bladeWrap);
-    }
-    hub.rotation.z = idx * 1.15;
-    tg.add(hub);
     windTurbineRotors.push({
-      hub,
+      hubPos,
+      yaw,
+      roll: initRoll,
       speedMult: 0.92 + (idx % 3) * 0.12,
       sphere: new THREE.Sphere(new THREE.Vector3(wt.x, wy + 34, wt.z), 52),
     });
-    root.add(tg);
   });
+  windRotorInst.instanceMatrix.needsUpdate = true;
+  root.add(windRotorInst);
 
   // === 6E. COSTA DO SOL BEACH (South-East ONLY: Helipad SOL-1 + Wooden Pier + Beach Umbrellas) ===
   const beachPad = helipads.find((h) => h.id === 'pad_beach_sol');
@@ -3131,6 +3162,14 @@ export function buildCoastalIslandWorld(
   const boatHullColors = [0xf8fafc, 0x0284c7, 0xd93542, 0xf59e0b, 0x10b981];
   const marinaBoatHullGeo = trackGeo(new THREE.BoxGeometry(3.2, 1.25, 7.6));
   const marinaBoatCabGeo = trackGeo(new THREE.BoxGeometry(2.3, 1.2, 3.0));
+  const marinaBoatEntries: Array<{
+    x: number;
+    baseY: number;
+    z: number;
+    yaw: number;
+    phase: number;
+    colorHex: number;
+  }> = [];
 
   BEACH_PIERS.forEach((pierSpec, pierIdx) => {
     const pierGroup = new THREE.Group();
@@ -3203,7 +3242,7 @@ export function buildCoastalIslandWorld(
     const mergedPierBulbs = mergeNormalizedGeos(pierBulbGeos);
     if (mergedPierBulbs) pierGroup.add(new THREE.Mesh(mergedPierBulbs, lampBulbMat));
 
-    // 5 Moored Marina Boats bobbing gently beside each pier's finger docks
+    // Register 5 Moored Marina Boats into a single instanced bobbing fleet (20 meshes -> 2 InstancedMeshes total!)
     const boatOffsets: Array<[number, number, number]> = [
       [-11.8, -pierLen * 0.14 + 4.4, 0.08],
       [11.8, -pierLen * 0.14 + 4.4, -0.06],
@@ -3211,34 +3250,64 @@ export function buildCoastalIslandWorld(
       [11.8, pierLen * 0.14 + 4.4, -0.09],
       [12.8, pierLen * 0.14 - 4.4, 0.04],
     ];
+    const cosPY = Math.cos(pierYaw);
+    const sinPY = Math.sin(pierYaw);
     boatOffsets.forEach(([bx, bz, rot], idx) => {
-      const bg = new THREE.Group();
-      const hullMat = trackMat(
-        new THREE.MeshStandardMaterial({
-          color: boatHullColors[(idx + pierIdx * 2) % boatHullColors.length],
-          roughness: 0.72,
-          metalness: 0.05,
-        })
-      );
-      const hull = new THREE.Mesh(marinaBoatHullGeo, hullMat);
-      hull.position.y = 0.45;
-      hull.castShadow = true;
-      bg.add(hull);
-      const cab = new THREE.Mesh(marinaBoatCabGeo, concreteMat);
-      cab.position.set(0, 1.45, -0.6);
-      bg.add(cab);
-      bg.position.set(bx, OCEAN_LEVEL - pierSpec.deckY + 0.15, bz);
-      bg.rotation.y = rot + Math.PI * 0.5;
-      pierGroup.add(bg);
-      bobbingVessels.push({
-        group: bg,
-        baseY: OCEAN_LEVEL - pierSpec.deckY + 0.15,
+      const wx = pierMidX + bx * cosPY + bz * sinPY;
+      const wz = pierMidZ - bx * sinPY + bz * cosPY;
+      marinaBoatEntries.push({
+        x: wx,
+        baseY: OCEAN_LEVEL + 0.15,
+        z: wz,
+        yaw: pierYaw + rot + Math.PI * 0.5,
         phase: idx * 1.35 + pierIdx * 2.1,
-        amp: 0.2,
+        colorHex: boatHullColors[(idx + pierIdx * 2) % boatHullColors.length],
       });
     });
     root.add(pierGroup);
   });
+
+  const marinaHullMat = trackMat(new THREE.MeshLambertMaterial({ color: 0xffffff }));
+  const marinaHullInst = new THREE.InstancedMesh(
+    marinaBoatHullGeo,
+    marinaHullMat,
+    Math.max(1, marinaBoatEntries.length)
+  );
+  const marinaCabinInst = new THREE.InstancedMesh(
+    marinaBoatCabGeo,
+    concreteMat,
+    Math.max(1, marinaBoatEntries.length)
+  );
+  marinaHullInst.castShadow = false;
+  marinaCabinInst.castShadow = false;
+  marinaHullInst.frustumCulled = false;
+  marinaCabinInst.frustumCulled = false;
+  {
+    const mbDummy = new THREE.Object3D();
+    const mbCol = new THREE.Color();
+    for (let i = 0; i < marinaBoatEntries.length; i++) {
+      const mb = marinaBoatEntries[i];
+      mbDummy.position.set(mb.x, mb.baseY + 0.45, mb.z);
+      mbDummy.rotation.set(0, mb.yaw, 0, 'YXZ');
+      mbDummy.scale.setScalar(1);
+      mbDummy.updateMatrix();
+      marinaHullInst.setMatrixAt(i, mbDummy.matrix);
+      mbCol.setHex(mb.colorHex);
+      marinaHullInst.setColorAt(i, mbCol);
+
+      mbDummy.position.set(
+        mb.x - Math.sin(mb.yaw) * 0.6,
+        mb.baseY + 1.45,
+        mb.z - Math.cos(mb.yaw) * 0.6
+      );
+      mbDummy.updateMatrix();
+      marinaCabinInst.setMatrixAt(i, mbDummy.matrix);
+    }
+    marinaHullInst.instanceMatrix.needsUpdate = true;
+    marinaCabinInst.instanceMatrix.needsUpdate = true;
+    if (marinaHullInst.instanceColor) marinaHullInst.instanceColor.needsUpdate = true;
+    root.add(marinaHullInst, marinaCabinInst);
+  }
 
   // Two Coastal Resort Hotels + Turquoise Swimming Pools along Costa do Sol
   const resortWallMat = trackMat(
@@ -3504,30 +3573,23 @@ export function buildCoastalIslandWorld(
 
   const oilPadTex = trackTex(createHelipadTexture(maxAnisotropy, 'oilrig'));
   const oilPadMat = trackMat(
-    new THREE.MeshStandardMaterial({
+    new THREE.MeshLambertMaterial({
       map: oilPadTex,
-      roughness: 0.88,
-      metalness: 0.0,
       polygonOffset: true,
       polygonOffsetFactor: -1,
       polygonOffsetUnits: -1,
     })
   );
 
-  const rigLegFoamRings: Array<{ mesh: THREE.Mesh; rigIdx: number }> = [];
   const rigSpheres: THREE.Sphere[] = OIL_RIGS.map(
     (rig) => new THREE.Sphere(new THREE.Vector3(rig.x, rig.deckY + 12, rig.z), 74)
   );
-  const rigFlares: Array<{
-    flame: THREE.Mesh;
-    core: THREE.Mesh;
-    halo: THREE.Mesh;
-    phase: number;
-    rigIdx: number;
-  }> = [];
+  const rigLegFoamCoords: Array<{ x: number; y: number; z: number; rigIdx: number }> = [];
+  const rigFlareCoords: Array<{ x: number; y: number; z: number; phase: number; rigIdx: number }> = [];
+  const osvEntries: Array<{ x: number; baseY: number; z: number; yaw: number; phase: number }> = [];
 
   // Shared Oil Rig geometries reused across Alpha, Bravo & Charlie
-  const rigLegFoamGeo = trackGeo(new THREE.RingGeometry(2.1, 4.35, 18));
+  const rigLegFoamGeo = trackGeo(new THREE.RingGeometry(2.1, 4.35, 16));
   rigLegFoamGeo.rotateX(-Math.PI / 2);
   const rigLegGeo = trackGeo(new THREE.CylinderGeometry(1.75, 2.25, 31, 8));
   const rigBraceLongGeo = trackGeo(new THREE.BoxGeometry(33, 1.1, 1.1));
@@ -3541,21 +3603,26 @@ export function buildCoastalIslandWorld(
   const rigCraneBoomGeo = trackGeo(new THREE.BoxGeometry(1.1, 1.1, 16));
   const rigDerrickColGeo = trackGeo(new THREE.CylinderGeometry(0.28, 0.48, 30, 6));
   const rigDerrickCrownGeo = trackGeo(new THREE.BoxGeometry(3.6, 1.4, 3.6));
-  const rigBeaconLgGeo = trackGeo(new THREE.SphereGeometry(0.85, 8, 8));
-  const rigBeaconSmGeo = trackGeo(new THREE.SphereGeometry(0.62, 8, 8));
   const rigFlareBoomGeo = trackGeo(new THREE.CylinderGeometry(0.32, 0.5, 22, 6));
   const rigFlareFlameGeo = trackGeo(new THREE.ConeGeometry(2.5, 8.2, 8));
   const rigFlareCoreGeo = trackGeo(new THREE.ConeGeometry(1.2, 5.0, 7));
-  const rigFlareHaloGeo = trackGeo(new THREE.SphereGeometry(8.8, 12, 10));
+  const rigFlareHaloGeo = trackGeo(new THREE.SphereGeometry(8.8, 10, 8));
   const rigPadSlabGeo = trackGeo(new THREE.BoxGeometry(23, 0.85, 23));
   const rigPadStrutGeo = trackGeo(new THREE.CylinderGeometry(0.45, 0.55, 6.2, 6));
-  const rigDerrickHaloGeo = trackGeo(new THREE.SphereGeometry(3.4, 10, 8));
-  const osvHullGeo = trackGeo(new THREE.BoxGeometry(10.5, 3.2, 28));
-  const osvDeckGeo = trackGeo(new THREE.BoxGeometry(9.6, 0.5, 17));
-  const osvBridgeGeo = trackGeo(new THREE.BoxGeometry(8.6, 6.4, 8.2));
-  const osvWinGeo = trackGeo(new THREE.BoxGeometry(8.9, 1.8, 5.8));
-  const osvCraneGeo = trackGeo(new THREE.BoxGeometry(0.9, 0.9, 9.5));
-  const osvBeaconGeo = trackGeo(new THREE.SphereGeometry(0.55, 8, 8));
+  const rigDerrickHaloGeo = trackGeo(new THREE.SphereGeometry(3.4, 8, 8));
+
+  // Merge all OSV parts into ONE shared vertex-colored geometry -> 1 single InstancedMesh for all 3 OSVs!
+  const osvParts: THREE.BufferGeometry[] = [];
+  pushTransformedGeo(osvParts, new THREE.BoxGeometry(10.5, 3.2, 28), 0, 1.1, 0, 0, 0, 0, 1, 1, 1, 0xcc5520);
+  pushTransformedGeo(osvParts, new THREE.BoxGeometry(9.6, 0.5, 17), 0, 2.8, -4.5, 0, 0, 0, 1, 1, 1, 0x4f5d6e);
+  pushTransformedGeo(osvParts, new THREE.BoxGeometry(8.6, 6.4, 8.2), 0, 5.8, 7.6, 0, 0, 0, 1, 1, 1, 0xf1f5f9);
+  pushTransformedGeo(osvParts, new THREE.BoxGeometry(8.9, 1.8, 5.8), 0, 7.2, 7.6, 0, 0, 0, 1, 1, 1, 0x1e293b);
+  pushTransformedGeo(osvParts, new THREE.BoxGeometry(0.9, 0.9, 9.5), 3.2, 5.6, -4.0, 0.32, 0, 0, 1, 1, 1, 0xe5b818);
+  pushTransformedGeo(osvParts, new THREE.SphereGeometry(0.55, 6, 6), 0, 9.6, 7.6, 0, 0, 0, 1, 1, 1, 0xff2a2a);
+  const mergedOsvGeo = mergeNormalizedGeos(osvParts, true)!;
+
+  const oilRigPadGeos: THREE.BufferGeometry[] = [];
+  const rigDerrickHaloGeos: THREE.BufferGeometry[] = [];
 
   OIL_RIGS.forEach((rig, rigIdx) => {
     const rigGroup = new THREE.Group();
@@ -3565,14 +3632,8 @@ export function buildCoastalIslandWorld(
       for (const lz of [-12, 12]) {
         const leg = new THREE.Mesh(rigLegGeo, rigRustOrangeMat);
         leg.position.set(lx, 3.2, lz);
-        leg.castShadow = true;
-        leg.receiveShadow = true;
         rigGroup.add(leg);
-
-        const legFoam = new THREE.Mesh(rigLegFoamGeo, shorelineFoamMat);
-        legFoam.position.set(lx, OCEAN_LEVEL + 0.24, lz);
-        rigGroup.add(legFoam);
-        rigLegFoamRings.push({ mesh: legFoam, rigIdx });
+        rigLegFoamCoords.push({ x: rig.x + lx, y: OCEAN_LEVEL + 0.24, z: rig.z + lz, rigIdx });
       }
     }
 
@@ -3593,8 +3654,6 @@ export function buildCoastalIslandWorld(
 
     const rigDeck = new THREE.Mesh(rigDeckGeo, rigSteelMat);
     rigDeck.position.set(0, rig.deckY - 1.0, 0);
-    rigDeck.castShadow = true;
-    rigDeck.receiveShadow = true;
     rigGroup.add(rigDeck);
     raycastTargets.push(rigDeck);
 
@@ -3604,8 +3663,6 @@ export function buildCoastalIslandWorld(
 
     const quarters = new THREE.Mesh(rigQuartersGeo, rigRustOrangeMat);
     quarters.position.set(-9, rig.deckY + 5.0, -7.5);
-    quarters.castShadow = true;
-    quarters.receiveShadow = true;
     rigGroup.add(quarters);
     raycastTargets.push(quarters);
 
@@ -3616,7 +3673,6 @@ export function buildCoastalIslandWorld(
     for (const sz of [3.5, 9.2]) {
       const silo = new THREE.Mesh(rigSiloGeo, concreteMat);
       silo.position.set(13.5, rig.deckY + 3.9, sz);
-      silo.castShadow = true;
       rigGroup.add(silo);
     }
 
@@ -3636,7 +3692,6 @@ export function buildCoastalIslandWorld(
         col.position.set(dx * 0.72, 15, dz * 0.72);
         col.rotation.z = dx > 0 ? 0.08 : -0.08;
         col.rotation.x = dz > 0 ? -0.08 : 0.08;
-        col.castShadow = true;
         derrickGroup.add(col);
       }
     }
@@ -3650,20 +3705,16 @@ export function buildCoastalIslandWorld(
     derrickCrown.position.y = 30.2;
     derrickGroup.add(derrickCrown);
     raycastTargets.push(derrickCrown);
-
-    const derrickBeacon = new THREE.Mesh(rigBeaconLgGeo, rigRedBeaconMat);
-    derrickBeacon.position.y = 32.0;
-    derrickGroup.add(derrickBeacon);
     rigGroup.add(derrickGroup);
 
+    // Push all oil rig warning beacons into the single global skyRedBeaconInst!
+    skyRedBeaconCoords.push({ x: rig.x + 7, y: rig.deckY + 32.2, z: rig.z - 5, r: 0.85 });
     for (const [bx, by, bz] of [
       [-15.6, rig.deckY + 10.6, -12.6],
       [-2.4, rig.deckY + 10.6, -12.6],
       [19.2, rig.deckY + 2.2, 15.2],
     ]) {
-      const warnLight = new THREE.Mesh(rigBeaconSmGeo, rigRedBeaconMat);
-      warnLight.position.set(bx, by, bz);
-      rigGroup.add(warnLight);
+      skyRedBeaconCoords.push({ x: rig.x + bx, y: by, z: rig.z + bz, r: 0.62 });
     }
 
     const flareBoom = new THREE.Mesh(rigFlareBoomGeo, rigSteelMat);
@@ -3671,30 +3722,17 @@ export function buildCoastalIslandWorld(
     flareBoom.rotation.z = -0.78;
     rigGroup.add(flareBoom);
 
-    const flame = new THREE.Mesh(rigFlareFlameGeo, rigFlareMat);
-    flame.position.set(32.0, rig.deckY + 17.5, -13);
-    rigGroup.add(flame);
-
-    const core = new THREE.Mesh(rigFlareCoreGeo, rigFlareCoreMat);
-    core.position.set(32.0, rig.deckY + 16.0, -13);
-    rigGroup.add(core);
-
-    const halo = new THREE.Mesh(rigFlareHaloGeo, rigFlareHaloMat);
-    halo.position.set(32.0, rig.deckY + 18.2, -13);
-    rigGroup.add(halo);
-
-    // Zero-cost additive halo replaces real Oil Rig PointLight for consistent 60 FPS across the entire map
-    rigFlares.push({ flame, core, halo, phase: rigIdx * 2.1, rigIdx });
+    rigFlareCoords.push({
+      x: rig.x + 32.0,
+      y: rig.deckY,
+      z: rig.z - 13,
+      phase: rigIdx * 2.1,
+      rigIdx,
+    });
 
     const padLocalX = rig.padX - rig.x;
     const padLocalZ = rig.padZ - rig.z;
-
-    const oilPadSlab = new THREE.Mesh(rigPadSlabGeo, oilPadMat);
-    oilPadSlab.position.set(padLocalX, rig.padY - 0.42, padLocalZ);
-    oilPadSlab.castShadow = true;
-    oilPadSlab.receiveShadow = true;
-    rigGroup.add(oilPadSlab);
-    raycastTargets.push(oilPadSlab);
+    pushTransformedGeo(oilRigPadGeos, rigPadSlabGeo.clone(), rig.padX, rig.padY - 0.42, rig.padZ);
 
     for (const sx of [-7, 7]) {
       const padStrut = new THREE.Mesh(rigPadStrutGeo, rigYellowMat);
@@ -3704,46 +3742,84 @@ export function buildCoastalIslandWorld(
     }
     addHelipadPerimeterLights(rigGroup, padLocalX, rig.padY + 0.3, padLocalZ, 10.6);
 
-    const derrickGlowHalo = new THREE.Mesh(rigDerrickHaloGeo, rigBeaconGlowMat);
-    derrickGlowHalo.position.set(7, rig.deckY + 32.2, -5);
-    rigGroup.add(derrickGlowHalo);
+    pushTransformedGeo(rigDerrickHaloGeos, rigDerrickHaloGeo.clone(), rig.x + 7, rig.deckY + 32.2, rig.z - 5);
 
-    // Moored Offshore Support Vessel (OSV) bobbing beside each Oil Rig
-    const osvGroup = new THREE.Group();
-    osvGroup.position.set(-54, OCEAN_LEVEL, 36);
-    osvGroup.rotation.y = 0.65 + rigIdx * 0.45;
-
-    const osvHull = new THREE.Mesh(osvHullGeo, rigRustOrangeMat);
-    osvHull.position.y = 1.1;
-    osvHull.castShadow = true;
-    osvGroup.add(osvHull);
-
-    const osvDeck = new THREE.Mesh(osvDeckGeo, darkConcreteMat);
-    osvDeck.position.set(0, 2.8, -4.5);
-    osvGroup.add(osvDeck);
-
-    const osvBridge = new THREE.Mesh(osvBridgeGeo, shipBridgeMat);
-    osvBridge.position.set(0, 5.8, 7.6);
-    osvBridge.castShadow = true;
-    osvGroup.add(osvBridge);
-
-    const osvWin = new THREE.Mesh(osvWinGeo, chaletWindowMat);
-    osvWin.position.set(0, 7.2, 7.6);
-    osvGroup.add(osvWin);
-
-    const osvCrane = new THREE.Mesh(osvCraneGeo, rigYellowMat);
-    osvCrane.position.set(3.2, 5.6, -4.0);
-    osvCrane.rotation.x = 0.32;
-    osvGroup.add(osvCrane);
-
-    const osvBeacon = new THREE.Mesh(osvBeaconGeo, rigRedBeaconMat);
-    osvBeacon.position.set(0, 9.6, 7.6);
-    osvGroup.add(osvBeacon);
-
-    rigGroup.add(osvGroup);
-    bobbingVessels.push({ group: osvGroup, baseY: OCEAN_LEVEL, phase: 2.3 + rigIdx * 1.4, amp: 0.34 });
+    osvEntries.push({
+      x: rig.x - 54,
+      baseY: OCEAN_LEVEL,
+      z: rig.z + 36,
+      yaw: 0.65 + rigIdx * 0.45,
+      phase: 2.3 + rigIdx * 1.4,
+    });
     root.add(rigGroup);
   });
+
+  const mergedOilPads = mergeNormalizedGeos(oilRigPadGeos);
+  if (mergedOilPads) {
+    const m = new THREE.Mesh(mergedOilPads, oilPadMat);
+    m.receiveShadow = true;
+    m.castShadow = false;
+    root.add(m);
+    raycastTargets.push(m);
+    cityFixedMeshes.add(m);
+  }
+  const mergedDerrickHalos = mergeNormalizedGeos(rigDerrickHaloGeos);
+  if (mergedDerrickHalos) {
+    const m = new THREE.Mesh(mergedDerrickHalos, rigBeaconGlowMat);
+    m.castShadow = false;
+    root.add(m);
+    cityFixedMeshes.add(m);
+  }
+
+  // 1 InstancedMesh for all 12 leg foam rings, 3 for all rig flares, 1 for all 3 OSVs!
+  const rigFoamInst = new THREE.InstancedMesh(rigLegFoamGeo, shorelineFoamMat, rigLegFoamCoords.length);
+  const rigFlameInst = new THREE.InstancedMesh(rigFlareFlameGeo, rigFlareMat, rigFlareCoords.length);
+  const rigCoreInst = new THREE.InstancedMesh(rigFlareCoreGeo, rigFlareCoreMat, rigFlareCoords.length);
+  const rigHaloInst = new THREE.InstancedMesh(rigFlareHaloGeo, rigFlareHaloMat, rigFlareCoords.length);
+  const osvInst = new THREE.InstancedMesh(mergedOsvGeo, vertexColorLambertMat, osvEntries.length);
+  for (const im of [rigFoamInst, rigFlameInst, rigCoreInst, rigHaloInst, osvInst]) {
+    im.castShadow = false;
+    im.frustumCulled = false;
+  }
+  {
+    const rDummy = new THREE.Object3D();
+    for (let i = 0; i < rigLegFoamCoords.length; i++) {
+      const f = rigLegFoamCoords[i];
+      rDummy.position.set(f.x, f.y, f.z);
+      rDummy.rotation.set(0, 0, 0);
+      rDummy.scale.setScalar(1);
+      rDummy.updateMatrix();
+      rigFoamInst.setMatrixAt(i, rDummy.matrix);
+    }
+    for (let i = 0; i < rigFlareCoords.length; i++) {
+      const fl = rigFlareCoords[i];
+      rDummy.rotation.set(0, 0, 0);
+      rDummy.scale.setScalar(1);
+      rDummy.position.set(fl.x, fl.y + 17.5, fl.z);
+      rDummy.updateMatrix();
+      rigFlameInst.setMatrixAt(i, rDummy.matrix);
+      rDummy.position.set(fl.x, fl.y + 16.0, fl.z);
+      rDummy.updateMatrix();
+      rigCoreInst.setMatrixAt(i, rDummy.matrix);
+      rDummy.position.set(fl.x, fl.y + 18.2, fl.z);
+      rDummy.updateMatrix();
+      rigHaloInst.setMatrixAt(i, rDummy.matrix);
+    }
+    for (let i = 0; i < osvEntries.length; i++) {
+      const o = osvEntries[i];
+      rDummy.position.set(o.x, o.baseY, o.z);
+      rDummy.rotation.set(0, o.yaw, 0, 'YXZ');
+      rDummy.scale.setScalar(1);
+      rDummy.updateMatrix();
+      osvInst.setMatrixAt(i, rDummy.matrix);
+    }
+    rigFoamInst.instanceMatrix.needsUpdate = true;
+    rigFlameInst.instanceMatrix.needsUpdate = true;
+    rigCoreInst.instanceMatrix.needsUpdate = true;
+    rigHaloInst.instanceMatrix.needsUpdate = true;
+    osvInst.instanceMatrix.needsUpdate = true;
+    root.add(rigFoamInst, rigFlameInst, rigCoreInst, rigHaloInst, osvInst);
+  }
 
   // === 7. INSTANCED BIOME VEGETATION & ROCKS (60 FPS: Pines + Broadleaf + GIANT TREES + Palms + Cacti + Rocks) ===
   const rand = mulberry32(2026);
@@ -4044,396 +4120,222 @@ export function buildCoastalIslandWorld(
   const cJointGeo = trackGeo(new THREE.BoxGeometry(2.1, 0.52, 0.52));
   cJointGeo.translate(0, 2.25, 0);
 
-  // Shared PBR foliage materials
-  const trunkMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0x5c3a1d, roughness: 0.95, metalness: 0.0 })
+  // Merge redwood 3-tier crown into 1 single geometry (3 draw calls -> 1!) and cactus 4 parts into 1 single geometry (4 -> 1!)
+  const rwCrownParts: THREE.BufferGeometry[] = [];
+  pushTransformedGeo(rwCrownParts, rwLowerGeo.clone(), 0, 0, 0, 0, 0, 0, 1, 1, 1, 0xe8ece8);
+  pushTransformedGeo(rwCrownParts, rwMidGeo.clone(), 0, 0, 0, 0, 0, 0, 1, 1, 1, 0xf4f7f4);
+  pushTransformedGeo(rwCrownParts, rwTopGeo.clone(), 0, 0, 0, 0, 0, 0, 1, 1, 1, 0xffffff);
+  const rwCrownMergedGeo = mergeNormalizedGeos(rwCrownParts, true)!;
+
+  const cactusParts: THREE.BufferGeometry[] = [];
+  pushTransformedGeo(cactusParts, cTrunkGeo.clone(), 0, 0, 0);
+  pushTransformedGeo(cactusParts, cArmLGeo.clone(), 0, 0, 0);
+  pushTransformedGeo(cactusParts, cArmRGeo.clone(), 0, 0, 0);
+  pushTransformedGeo(cactusParts, cJointGeo.clone(), 0, 0, 0);
+  const cactusMergedGeo = mergeNormalizedGeos(cactusParts, false)!;
+
+  // Lightweight MeshLambertMaterial foliage (ZERO castShadow, fast GPU shading)
+  const trunkMat = trackMat(new THREE.MeshLambertMaterial({ color: 0x5c3a1d }));
+  const rwTrunkMat = trackMat(new THREE.MeshLambertMaterial({ color: 0x6b3a24 }));
+  const foliageMat = trackMat(new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true }));
+  const rwFoliageMat = trackMat(
+    new THREE.MeshLambertMaterial({ color: 0xffffff, vertexColors: true, flatShading: true })
   );
-  const rwTrunkMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0x6b3a24, roughness: 0.94, metalness: 0.0 })
-  );
-  const foliageMat = trackMat(
-    new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      roughness: 0.92,
-      metalness: 0.0,
-      flatShading: true,
-    })
-  );
-  const palmTrunkMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0x855a36, roughness: 0.94, metalness: 0.0 })
-  );
-  const palmFrondMat = trackMat(
-    new THREE.MeshStandardMaterial({
-      color: 0x3b8c3e,
-      roughness: 0.9,
-      metalness: 0.0,
-      flatShading: true,
-    })
-  );
-  const cactusMat = trackMat(
-    new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      roughness: 0.92,
-      metalness: 0.0,
-      flatShading: true,
-    })
-  );
+  const palmTrunkMat = trackMat(new THREE.MeshLambertMaterial({ color: 0x855a36 }));
+  const palmFrondMat = trackMat(new THREE.MeshLambertMaterial({ color: 0x3b8c3e, flatShading: true }));
+  const cactusMat = trackMat(new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true }));
 
   const treePalettePark = [0x2f823d, 0x3b9444, 0x246f45, 0x45963e];
   const treePaletteForest = [0x1a4d2c, 0x205c33, 0x154225, 0x296938];
   const treePaletteSnowPine = [0x1a423b, 0x1e4c44, 0x153730, 0x23544b];
   const cactusPalette = [0x367538, 0x41823e, 0x2f6934, 0x4b8742];
 
-  interface VegCell {
-    pines: Array<{ x: number; y: number; z: number; scale: number; yaw: number; lowerColor: number; upperColor: number }>;
-    broadleaf: Array<{ x: number; y: number; z: number; scale: number; yaw: number; color: number }>;
-    redwoods: Array<{ x: number; y: number; z: number; scaleXZ: number; scaleY: number; yaw: number; color: number }>;
-    giantCanopy: Array<{ x: number; y: number; z: number; scaleXZ: number; scaleY: number; yaw: number; color: number }>;
-    palms: Array<{ x: number; y: number; z: number; scale: number; yaw: number }>;
-    cacti: Array<{ x: number; y: number; z: number; scale: number; yaw: number; color: number }>;
-    minX: number;
-    maxX: number;
-    minY: number;
-    maxY: number;
-    minZ: number;
-    maxZ: number;
-  }
-
-  const VEG_CHUNK_SIZE = 240;
-  const vegCells = new Map<string, VegCell>();
-  const getVegCell = (x: number, y: number, z: number, heightPad: number): VegCell => {
-    const key = `${Math.floor(x / VEG_CHUNK_SIZE)}_${Math.floor(z / VEG_CHUNK_SIZE)}`;
-    let cell = vegCells.get(key);
-    if (!cell) {
-      cell = {
-        pines: [],
-        broadleaf: [],
-        redwoods: [],
-        giantCanopy: [],
-        palms: [],
-        cacti: [],
-        minX: x,
-        maxX: x,
-        minY: y,
-        maxY: y + heightPad,
-        minZ: z,
-        maxZ: z,
-      };
-      vegCells.set(key, cell);
-    } else {
-      if (x < cell.minX) cell.minX = x;
-      if (x > cell.maxX) cell.maxX = x;
-      if (y < cell.minY) cell.minY = y;
-      if (y + heightPad > cell.maxY) cell.maxY = y + heightPad;
-      if (z < cell.minZ) cell.minZ = z;
-      if (z > cell.maxZ) cell.maxZ = z;
-    }
-    return cell;
-  };
-
-  treePositions.forEach((t, idx) => {
-    const yaw = rand() * Math.PI * 2;
-    let lowerColor: number;
-    let upperColor: number;
-    if (t.biome === 'snow') {
-      lowerColor = treePaletteSnowPine[idx % treePaletteSnowPine.length];
-      upperColor = idx % 3 === 0 ? 0xcfdbe8 : 0xdce6f0;
-    } else {
-      const palette = t.biome === 'park' ? treePalettePark : treePaletteForest;
-      lowerColor = palette[idx % palette.length];
-      instColor.setHex(lowerColor).offsetHSL(0, 0.02, 0.035);
-      upperColor = instColor.getHex();
-    }
-    getVegCell(t.x, t.y, t.z, 12 * t.scale).pines.push({
-      x: t.x,
-      y: t.y,
-      z: t.z,
-      scale: t.scale,
-      yaw,
-      lowerColor,
-      upperColor,
-    });
-  });
-
-  broadleafPositions.forEach((b) => {
-    getVegCell(b.x, b.y, b.z, 10 * b.scale).broadleaf.push({
-      x: b.x,
-      y: b.y,
-      z: b.z,
-      scale: b.scale,
-      yaw: rand() * Math.PI * 2,
-      color: b.color,
-    });
-  });
-
-  giantRedwoodPositions.forEach((g) => {
-    getVegCell(g.x, g.y, g.z, 22 * g.scaleY).redwoods.push({
-      x: g.x,
-      y: g.y,
-      z: g.z,
-      scaleXZ: g.scaleXZ,
-      scaleY: g.scaleY,
-      yaw: rand() * Math.PI * 2,
-      color: g.color,
-    });
-  });
-
-  giantCanopyPositions.forEach((g) => {
-    getVegCell(g.x, g.y, g.z, 16 * g.scaleY).giantCanopy.push({
-      x: g.x,
-      y: g.y,
-      z: g.z,
-      scaleXZ: g.scaleXZ,
-      scaleY: g.scaleY,
-      yaw: rand() * Math.PI * 2,
-      color: g.color,
-    });
-  });
-
-  palmPositions.forEach((p) => {
-    getVegCell(p.x, p.y, p.z, 11 * p.scale).palms.push(p);
-  });
-
-  cactusPositions.forEach((c, idx) => {
-    getVegCell(c.x, c.y, c.z, 6 * c.scale).cacti.push({
-      x: c.x,
-      y: c.y,
-      z: c.z,
-      scale: c.scale,
-      yaw: c.yaw,
-      color: cactusPalette[idx % cactusPalette.length],
-    });
-  });
-
+  // GLOBAL NON-CHUNKED INSTANCED VEGETATION (~400+ spatial cell calls -> 12 calls TOTAL across the entire island! Zero pop-in!)
   const frondDummy = new THREE.Object3D();
   const vegRootGroup = new THREE.Group();
-  vegRootGroup.name = 'SpatialVegetationChunks';
+  vegRootGroup.name = 'GlobalInstancedVegetation';
 
-  vegCells.forEach((cell) => {
-    const chunkGroup = new THREE.Group();
+  // 1. Pines (Forest, Park & Alpine Snow Pines) — 3 draw calls total
+  if (treePositions.length > 0) {
+    const n = treePositions.length;
+    const tInst = new THREE.InstancedMesh(trunkGeo, trunkMat, n);
+    const lInst = new THREE.InstancedMesh(lowerCrownGeo, foliageMat, n);
+    const uInst = new THREE.InstancedMesh(upperCrownGeo, foliageMat, n);
+    for (let i = 0; i < n; i++) {
+      const t = treePositions[i];
+      const yaw = rand() * Math.PI * 2;
+      dummy.position.set(t.x, t.y - 0.25, t.z);
+      dummy.rotation.set(0, yaw, 0);
+      dummy.scale.setScalar(t.scale);
+      dummy.updateMatrix();
+      tInst.setMatrixAt(i, dummy.matrix);
+      lInst.setMatrixAt(i, dummy.matrix);
+      uInst.setMatrixAt(i, dummy.matrix);
 
-    const cx = (cell.minX + cell.maxX) * 0.5;
-    const cy = (cell.minY + cell.maxY) * 0.5;
-    const cz = (cell.minZ + cell.maxZ) * 0.5;
-    const radius =
-      Math.hypot(
-        (cell.maxX - cell.minX) * 0.5,
-        (cell.maxY - cell.minY) * 0.5,
-        (cell.maxZ - cell.minZ) * 0.5
-      ) + 14;
-    const cellSphere = new THREE.Sphere(new THREE.Vector3(cx, cy, cz), radius);
-
-    // 1. Pines (Forest, Park & Alpine Snow Pines)
-    if (cell.pines.length > 0) {
-      const n = cell.pines.length;
-      const tInst = new THREE.InstancedMesh(trunkGeo, trunkMat, n);
-      const lInst = new THREE.InstancedMesh(lowerCrownGeo, foliageMat, n);
-      const uInst = new THREE.InstancedMesh(upperCrownGeo, foliageMat, n);
-      lInst.receiveShadow = true;
-
-      for (let i = 0; i < n; i++) {
-        const t = cell.pines[i];
-        dummy.position.set(t.x, t.y - 0.25, t.z);
-        dummy.rotation.set(0, t.yaw, 0);
-        dummy.scale.setScalar(t.scale);
-        dummy.updateMatrix();
-        tInst.setMatrixAt(i, dummy.matrix);
-        lInst.setMatrixAt(i, dummy.matrix);
-        uInst.setMatrixAt(i, dummy.matrix);
-
-        instColor.setHex(t.lowerColor);
-        lInst.setColorAt(i, instColor);
-        instColor.setHex(t.upperColor);
-        uInst.setColorAt(i, instColor);
+      let lowerColor: number;
+      let upperColor: number;
+      if (t.biome === 'snow') {
+        lowerColor = treePaletteSnowPine[i % treePaletteSnowPine.length];
+        upperColor = i % 3 === 0 ? 0xcfdbe8 : 0xdce6f0;
+      } else {
+        const palette = t.biome === 'park' ? treePalettePark : treePaletteForest;
+        lowerColor = palette[i % palette.length];
+        instColor.setHex(lowerColor).offsetHSL(0, 0.02, 0.035);
+        upperColor = instColor.getHex();
       }
-
-      for (const im of [tInst, lInst, uInst]) {
-        im.castShadow = false;
-        im.instanceMatrix.needsUpdate = true;
-        if (im.instanceColor) im.instanceColor.needsUpdate = true;
-        im.boundingSphere = cellSphere.clone();
-        im.frustumCulled = true;
-      }
-      chunkGroup.add(tInst, lInst, uInst);
+      instColor.setHex(lowerColor);
+      lInst.setColorAt(i, instColor);
+      instColor.setHex(upperColor);
+      uInst.setColorAt(i, instColor);
     }
-
-    // 2. Broadleaf Trees
-    if (cell.broadleaf.length > 0) {
-      const n = cell.broadleaf.length;
-      const tInst = new THREE.InstancedMesh(blTrunkGeo, trunkMat, n);
-      const cInst = new THREE.InstancedMesh(blCrownGeo, foliageMat, n);
-      cInst.receiveShadow = true;
-
-      for (let i = 0; i < n; i++) {
-        const b = cell.broadleaf[i];
-        dummy.position.set(b.x, b.y - 0.25, b.z);
-        dummy.rotation.set(0, b.yaw, 0);
-        dummy.scale.set(b.scale * 1.08, b.scale * 0.96, b.scale * 1.08);
-        dummy.updateMatrix();
-        tInst.setMatrixAt(i, dummy.matrix);
-        cInst.setMatrixAt(i, dummy.matrix);
-        instColor.setHex(b.color);
-        cInst.setColorAt(i, instColor);
-      }
-
-      for (const im of [tInst, cInst]) {
-        im.castShadow = false;
-        im.instanceMatrix.needsUpdate = true;
-        if (im.instanceColor) im.instanceColor.needsUpdate = true;
-        im.boundingSphere = cellSphere.clone();
-        im.frustumCulled = true;
-      }
-      chunkGroup.add(tInst, cInst);
+    for (const im of [tInst, lInst, uInst]) {
+      im.castShadow = false;
+      im.instanceMatrix.needsUpdate = true;
+      if (im.instanceColor) im.instanceColor.needsUpdate = true;
+      im.computeBoundingSphere();
+      im.frustumCulled = true;
     }
+    vegRootGroup.add(tInst, lInst, uInst);
+  }
 
-    // 3. Giant Redwood Sequoias
-    if (cell.redwoods.length > 0) {
-      const n = cell.redwoods.length;
-      const tInst = new THREE.InstancedMesh(rwTrunkGeo, rwTrunkMat, n);
-      const lInst = new THREE.InstancedMesh(rwLowerGeo, foliageMat, n);
-      const mInst = new THREE.InstancedMesh(rwMidGeo, foliageMat, n);
-      const topInst = new THREE.InstancedMesh(rwTopGeo, foliageMat, n);
-
-      for (let i = 0; i < n; i++) {
-        const g = cell.redwoods[i];
-        dummy.position.set(g.x, g.y - 0.5, g.z);
-        dummy.rotation.set(0, g.yaw, 0);
-        dummy.scale.set(g.scaleXZ, g.scaleY, g.scaleXZ);
-        dummy.updateMatrix();
-        tInst.setMatrixAt(i, dummy.matrix);
-        lInst.setMatrixAt(i, dummy.matrix);
-        mInst.setMatrixAt(i, dummy.matrix);
-        topInst.setMatrixAt(i, dummy.matrix);
-
-        instColor.setHex(g.color);
-        lInst.setColorAt(i, instColor);
-        instColor.offsetHSL(0, 0.02, 0.025);
-        mInst.setColorAt(i, instColor);
-        instColor.offsetHSL(0, 0.02, 0.03);
-        topInst.setColorAt(i, instColor);
-      }
-
-      for (const im of [tInst, lInst, mInst, topInst]) {
-        im.castShadow = false;
-        im.instanceMatrix.needsUpdate = true;
-        if (im.instanceColor) im.instanceColor.needsUpdate = true;
-        im.boundingSphere = cellSphere.clone();
-        im.frustumCulled = true;
-      }
-      chunkGroup.add(tInst, lInst, mInst, topInst);
+  // 2. Broadleaf Trees — 2 draw calls total
+  if (broadleafPositions.length > 0) {
+    const n = broadleafPositions.length;
+    const tInst = new THREE.InstancedMesh(blTrunkGeo, trunkMat, n);
+    const cInst = new THREE.InstancedMesh(blCrownGeo, foliageMat, n);
+    for (let i = 0; i < n; i++) {
+      const b = broadleafPositions[i];
+      dummy.position.set(b.x, b.y - 0.25, b.z);
+      dummy.rotation.set(0, rand() * Math.PI * 2, 0);
+      dummy.scale.set(b.scale * 1.08, b.scale * 0.96, b.scale * 1.08);
+      dummy.updateMatrix();
+      tInst.setMatrixAt(i, dummy.matrix);
+      cInst.setMatrixAt(i, dummy.matrix);
+      instColor.setHex(b.color);
+      cInst.setColorAt(i, instColor);
     }
-
-    // 4. Giant Wide-Canopy Trees
-    if (cell.giantCanopy.length > 0) {
-      const n = cell.giantCanopy.length;
-      const tInst = new THREE.InstancedMesh(gcTrunkGeo, trunkMat, n);
-      const cInst = new THREE.InstancedMesh(gcCrownGeo, foliageMat, n);
-      cInst.receiveShadow = true;
-
-      for (let i = 0; i < n; i++) {
-        const g = cell.giantCanopy[i];
-        dummy.position.set(g.x, g.y - 0.5, g.z);
-        dummy.rotation.set(0, g.yaw, 0);
-        dummy.scale.set(g.scaleXZ, g.scaleY, g.scaleXZ);
-        dummy.updateMatrix();
-        tInst.setMatrixAt(i, dummy.matrix);
-        cInst.setMatrixAt(i, dummy.matrix);
-        instColor.setHex(g.color);
-        cInst.setColorAt(i, instColor);
-      }
-
-      for (const im of [tInst, cInst]) {
-        im.castShadow = false;
-        im.instanceMatrix.needsUpdate = true;
-        if (im.instanceColor) im.instanceColor.needsUpdate = true;
-        im.boundingSphere = cellSphere.clone();
-        im.frustumCulled = true;
-      }
-      chunkGroup.add(tInst, cInst);
+    for (const im of [tInst, cInst]) {
+      im.castShadow = false;
+      im.instanceMatrix.needsUpdate = true;
+      if (im.instanceColor) im.instanceColor.needsUpdate = true;
+      im.computeBoundingSphere();
+      im.frustumCulled = true;
     }
+    vegRootGroup.add(tInst, cInst);
+  }
 
-    // 5. Coconut Palms (Costa do Sol)
-    if (cell.palms.length > 0) {
-      const n = cell.palms.length;
-      const tInst = new THREE.InstancedMesh(palmTrunkGeo, palmTrunkMat, n);
-      const fInst = new THREE.InstancedMesh(palmFrondGeo, palmFrondMat, n * 5);
-
-      for (let i = 0; i < n; i++) {
-        const p = cell.palms[i];
-        dummy.position.set(p.x, p.y - 0.15, p.z);
-        dummy.rotation.set(0, p.yaw, 0);
-        dummy.scale.setScalar(p.scale);
-        dummy.updateMatrix();
-        tInst.setMatrixAt(i, dummy.matrix);
-
-        const topX = p.x - Math.sin(0.14) * 8.1 * p.scale * Math.cos(p.yaw);
-        const topY = p.y - 0.15 + Math.cos(0.14) * 8.1 * p.scale;
-        const topZ = p.z + Math.sin(0.14) * 8.1 * p.scale * Math.sin(p.yaw);
-        for (let f = 0; f < 5; f++) {
-          const fAng = p.yaw + (f / 5) * Math.PI * 2;
-          frondDummy.position.set(topX, topY, topZ);
-          frondDummy.rotation.set(0.32, fAng, 0);
-          frondDummy.scale.setScalar(p.scale);
-          frondDummy.updateMatrix();
-          fInst.setMatrixAt(i * 5 + f, frondDummy.matrix);
-        }
-      }
-
-      for (const im of [tInst, fInst]) {
-        im.castShadow = false;
-        im.instanceMatrix.needsUpdate = true;
-        im.boundingSphere = cellSphere.clone();
-        im.frustumCulled = true;
-      }
-      chunkGroup.add(tInst, fInst);
+  // 3. Giant Redwood Sequoias — 2 draw calls total (trunk + merged 3-tier crown)
+  if (giantRedwoodPositions.length > 0) {
+    const n = giantRedwoodPositions.length;
+    const tInst = new THREE.InstancedMesh(rwTrunkGeo, rwTrunkMat, n);
+    const cInst = new THREE.InstancedMesh(rwCrownMergedGeo, rwFoliageMat, n);
+    for (let i = 0; i < n; i++) {
+      const g = giantRedwoodPositions[i];
+      dummy.position.set(g.x, g.y - 0.5, g.z);
+      dummy.rotation.set(0, rand() * Math.PI * 2, 0);
+      dummy.scale.set(g.scaleXZ, g.scaleY, g.scaleXZ);
+      dummy.updateMatrix();
+      tInst.setMatrixAt(i, dummy.matrix);
+      cInst.setMatrixAt(i, dummy.matrix);
+      instColor.setHex(g.color);
+      cInst.setColorAt(i, instColor);
     }
-
-    // 6. Desert Saguaro Cacti
-    if (cell.cacti.length > 0) {
-      const n = cell.cacti.length;
-      const tInst = new THREE.InstancedMesh(cTrunkGeo, cactusMat, n);
-      const lInst = new THREE.InstancedMesh(cArmLGeo, cactusMat, n);
-      const rInst = new THREE.InstancedMesh(cArmRGeo, cactusMat, n);
-      const jInst = new THREE.InstancedMesh(cJointGeo, cactusMat, n);
-
-      for (let i = 0; i < n; i++) {
-        const c = cell.cacti[i];
-        dummy.position.set(c.x, c.y - 0.15, c.z);
-        dummy.rotation.set(0, c.yaw, 0);
-        dummy.scale.setScalar(c.scale);
-        dummy.updateMatrix();
-        tInst.setMatrixAt(i, dummy.matrix);
-        lInst.setMatrixAt(i, dummy.matrix);
-        rInst.setMatrixAt(i, dummy.matrix);
-        jInst.setMatrixAt(i, dummy.matrix);
-
-        instColor.setHex(c.color);
-        tInst.setColorAt(i, instColor);
-        lInst.setColorAt(i, instColor);
-        rInst.setColorAt(i, instColor);
-        jInst.setColorAt(i, instColor);
-      }
-
-      for (const im of [tInst, lInst, rInst, jInst]) {
-        im.castShadow = false;
-        im.instanceMatrix.needsUpdate = true;
-        if (im.instanceColor) im.instanceColor.needsUpdate = true;
-        im.boundingSphere = cellSphere.clone();
-        im.frustumCulled = true;
-      }
-      chunkGroup.add(tInst, lInst, rInst, jInst);
+    for (const im of [tInst, cInst]) {
+      im.castShadow = false;
+      im.instanceMatrix.needsUpdate = true;
+      if (im.instanceColor) im.instanceColor.needsUpdate = true;
+      im.computeBoundingSphere();
+      im.frustumCulled = true;
     }
+    vegRootGroup.add(tInst, cInst);
+  }
 
-    vegRootGroup.add(chunkGroup);
-    spatialLOD.addFoliageChunk(cellSphere, chunkGroup);
-  });
+  // 4. Giant Wide-Canopy Trees — 2 draw calls total
+  if (giantCanopyPositions.length > 0) {
+    const n = giantCanopyPositions.length;
+    const tInst = new THREE.InstancedMesh(gcTrunkGeo, trunkMat, n);
+    const cInst = new THREE.InstancedMesh(gcCrownGeo, foliageMat, n);
+    for (let i = 0; i < n; i++) {
+      const g = giantCanopyPositions[i];
+      dummy.position.set(g.x, g.y - 0.5, g.z);
+      dummy.rotation.set(0, rand() * Math.PI * 2, 0);
+      dummy.scale.set(g.scaleXZ, g.scaleY, g.scaleXZ);
+      dummy.updateMatrix();
+      tInst.setMatrixAt(i, dummy.matrix);
+      cInst.setMatrixAt(i, dummy.matrix);
+      instColor.setHex(g.color);
+      cInst.setColorAt(i, instColor);
+    }
+    for (const im of [tInst, cInst]) {
+      im.castShadow = false;
+      im.instanceMatrix.needsUpdate = true;
+      if (im.instanceColor) im.instanceColor.needsUpdate = true;
+      im.computeBoundingSphere();
+      im.frustumCulled = true;
+    }
+    vegRootGroup.add(tInst, cInst);
+  }
+
+  // 5. Coconut Palms (Costa do Sol) — 2 draw calls total
+  if (palmPositions.length > 0) {
+    const n = palmPositions.length;
+    const tInst = new THREE.InstancedMesh(palmTrunkGeo, palmTrunkMat, n);
+    const fInst = new THREE.InstancedMesh(palmFrondGeo, palmFrondMat, n * 5);
+    for (let i = 0; i < n; i++) {
+      const p = palmPositions[i];
+      dummy.position.set(p.x, p.y - 0.15, p.z);
+      dummy.rotation.set(0, p.yaw, 0);
+      dummy.scale.setScalar(p.scale);
+      dummy.updateMatrix();
+      tInst.setMatrixAt(i, dummy.matrix);
+
+      const topX = p.x - Math.sin(0.14) * 8.1 * p.scale * Math.cos(p.yaw);
+      const topY = p.y - 0.15 + Math.cos(0.14) * 8.1 * p.scale;
+      const topZ = p.z + Math.sin(0.14) * 8.1 * p.scale * Math.sin(p.yaw);
+      for (let f = 0; f < 5; f++) {
+        const fAng = p.yaw + (f / 5) * Math.PI * 2;
+        frondDummy.position.set(topX, topY, topZ);
+        frondDummy.rotation.set(0.32, fAng, 0);
+        frondDummy.scale.setScalar(p.scale);
+        frondDummy.updateMatrix();
+        fInst.setMatrixAt(i * 5 + f, frondDummy.matrix);
+      }
+    }
+    for (const im of [tInst, fInst]) {
+      im.castShadow = false;
+      im.instanceMatrix.needsUpdate = true;
+      im.computeBoundingSphere();
+      im.frustumCulled = true;
+    }
+    vegRootGroup.add(tInst, fInst);
+  }
+
+  // 6. Desert Saguaro Cacti — 1 single draw call total (merged trunk + arms + joint!)
+  if (cactusPositions.length > 0) {
+    const n = cactusPositions.length;
+    const cInst = new THREE.InstancedMesh(cactusMergedGeo, cactusMat, n);
+    for (let i = 0; i < n; i++) {
+      const c = cactusPositions[i];
+      dummy.position.set(c.x, c.y - 0.15, c.z);
+      dummy.rotation.set(0, c.yaw, 0);
+      dummy.scale.setScalar(c.scale);
+      dummy.updateMatrix();
+      cInst.setMatrixAt(i, dummy.matrix);
+      instColor.setHex(cactusPalette[i % cactusPalette.length]);
+      cInst.setColorAt(i, instColor);
+    }
+    cInst.castShadow = false;
+    cInst.instanceMatrix.needsUpdate = true;
+    if (cInst.instanceColor) cInst.instanceColor.needsUpdate = true;
+    cInst.computeBoundingSphere();
+    cInst.frustumCulled = true;
+    vegRootGroup.add(cInst);
+  }
   root.add(vegRootGroup);
 
-  // Spatial-Chunked Desert Sandstone & Forest Granite Boulders (always visible in frustum, zero distance pop-in!)
+  // Global Instanced Desert Sandstone & Forest Granite Boulders (1 draw call total instead of ~25!)
   const boulderGeo = trackGeo(new THREE.DodecahedronGeometry(2.6, 0));
-  const boulderMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.94, metalness: 0.0, flatShading: true })
-  );
+  const boulderMat = trackMat(new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true }));
   interface BoulderSpec {
     x: number;
     y: number;
@@ -4446,17 +4348,7 @@ export function buildCoastalIslandWorld(
     sz: number;
     color: number;
   }
-  const boulderCells = new Map<string, BoulderSpec[]>();
-  const pushBoulder = (spec: BoulderSpec) => {
-    const key = `${Math.floor(spec.x / 320)}_${Math.floor(spec.z / 320)}`;
-    let list = boulderCells.get(key);
-    if (!list) {
-      list = [];
-      boulderCells.set(key, list);
-    }
-    list.push(spec);
-  };
-
+  const allBoulders: BoulderSpec[] = [];
   let bPlaced = 0;
   for (let i = 0; i < 340 && bPlaced < 150; i++) {
     const bx = DESERT_REGION.x + (rand() - 0.5) * DESERT_REGION.rx * 1.7;
@@ -4465,7 +4357,7 @@ export function buildCoastalIslandWorld(
     if (!isClearOfStructures(bx, bz)) continue;
     const by = getTerrainHeight(bx, bz);
     if (by < 5) continue;
-    pushBoulder({
+    allBoulders.push({
       x: bx,
       y: by + 0.5,
       z: bz,
@@ -4486,7 +4378,7 @@ export function buildCoastalIslandWorld(
     if (!isClearOfStructures(bx, bz)) continue;
     const by = getTerrainHeight(bx, bz);
     if (by < 6) continue;
-    pushBoulder({
+    allBoulders.push({
       x: bx,
       y: by + 0.4,
       z: bz,
@@ -4500,12 +4392,12 @@ export function buildCoastalIslandWorld(
     });
     bPlaced++;
   }
-  boulderCells.forEach((list) => {
-    const bInst = new THREE.InstancedMesh(boulderGeo, boulderMat, list.length);
+  if (allBoulders.length > 0) {
+    const bInst = new THREE.InstancedMesh(boulderGeo, boulderMat, allBoulders.length);
     bInst.castShadow = false;
     bInst.receiveShadow = true;
-    for (let i = 0; i < list.length; i++) {
-      const b = list[i];
+    for (let i = 0; i < allBoulders.length; i++) {
+      const b = allBoulders[i];
       dummy.position.set(b.x, b.y, b.z);
       dummy.rotation.set(b.rx, b.ry, b.rz);
       dummy.scale.set(b.sx, b.sy, b.sz);
@@ -4519,7 +4411,7 @@ export function buildCoastalIslandWorld(
     bInst.computeBoundingSphere();
     bInst.frustumCulled = true;
     root.add(bInst);
-  });
+  }
 
   // === 8. SOFT VOLUMETRIC COTTON-SMOKE CLOUDS (SPRITES) & ROUND RADIAL-GLOW STARFIELD ===
   const createSoftCloudTexture = (variant: number): THREE.CanvasTexture => {
@@ -4584,95 +4476,111 @@ export function buildCoastalIslandWorld(
   const cloudTexA = trackTex(createSoftCloudTexture(0));
   const cloudTexB = trackTex(createSoftCloudTexture(1));
 
+  // INSTANCED SHADER-BILLBOARD VOLUMETRIC CLOUDS (~490 individual THREE.Sprite draw calls -> 2 draw calls TOTAL!)
   const cloudsGroup = new THREE.Group();
-  const cloudTopMatA = trackMat(
-    new THREE.SpriteMaterial({
-      map: cloudTexA,
-      color: 0xf4f8fc,
-      transparent: true,
-      opacity: 0.54,
-      depthWrite: false,
-      fog: true,
-    })
-  );
-  const cloudTopMatB = trackMat(
-    new THREE.SpriteMaterial({
-      map: cloudTexB,
-      color: 0xf4f8fc,
-      transparent: true,
-      opacity: 0.5,
-      depthWrite: false,
-      fog: true,
-    })
-  );
-  const cloudBaseMatA = trackMat(
-    new THREE.SpriteMaterial({
-      map: cloudTexA,
-      color: 0xc8d8e8,
-      transparent: true,
-      opacity: 0.46,
-      depthWrite: false,
-      fog: true,
-    })
-  );
-  const cloudBaseMatB = trackMat(
-    new THREE.SpriteMaterial({
-      map: cloudTexB,
-      color: 0xc8d8e8,
-      transparent: true,
-      opacity: 0.44,
-      depthWrite: false,
-      fog: true,
-    })
-  );
+  const cloudBillboardUniforms = {
+    uCloudScaleXZ: { value: 1.0 },
+    uCloudScaleY: { value: 1.0 },
+  };
+  const makeCloudBillboardMat = (tex: THREE.CanvasTexture, colorHex: number, opacity: number) => {
+    const mat = trackMat(
+      new THREE.MeshBasicMaterial({
+        map: tex,
+        color: colorHex,
+        transparent: true,
+        opacity,
+        depthWrite: false,
+        fog: true,
+      })
+    );
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.uCloudScaleXZ = cloudBillboardUniforms.uCloudScaleXZ;
+      shader.uniforms.uCloudScaleY = cloudBillboardUniforms.uCloudScaleY;
+      shader.vertexShader =
+        `uniform float uCloudScaleXZ;\nuniform float uCloudScaleY;\n` + shader.vertexShader;
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <project_vertex>',
+        `vec4 mvCenter = modelViewMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+        float cSx = length(vec3(instanceMatrix[0][0], instanceMatrix[0][1], instanceMatrix[0][2])) * uCloudScaleXZ;
+        float cSy = length(vec3(instanceMatrix[1][0], instanceMatrix[1][1], instanceMatrix[1][2])) * uCloudScaleY;
+        vec4 mvPosition = mvCenter;
+        mvPosition.xy += position.xy * vec2(cSx, cSy);
+        gl_Position = projectionMatrix * mvPosition;`
+      );
+    };
+    mat.customProgramCacheKey = () => 'instanced-cloud-billboard';
+    return mat;
+  };
 
-  const cloudEntries: Array<{
-    group: THREE.Group;
-    baseY: number;
-    phase: number;
-    topPuffs: Array<{ sprite: THREE.Sprite; baseX: number; baseZ: number }>;
-  }> = [];
+  const cloudTopMat = makeCloudBillboardMat(cloudTexA, 0xf4f8fc, 0.54);
+  const cloudBaseMat = makeCloudBillboardMat(cloudTexB, 0xc8d8e8, 0.46);
 
-  for (let i = 0; i < 74; i++) {
-    const cloud = new THREE.Group();
-    const angle = (i / 74) * Math.PI * 2 + rand() * 0.35;
+  const cloudBasePuffs: Array<{ x: number; y: number; z: number; sx: number; sy: number }> = [];
+  const cloudTopPuffs: Array<{ x: number; y: number; z: number; sx: number; sy: number }> = [];
+
+  for (let i = 0; i < 64; i++) {
+    const angle = (i / 64) * Math.PI * 2 + rand() * 0.35;
     const dist = 240 + rand() * 2900;
-    const baseY = 235 + rand() * 115;
-    cloud.position.set(Math.cos(angle) * dist, baseY, Math.sin(angle) * dist);
+    const cx = Math.cos(angle) * dist;
+    const cy = 235 + rand() * 115;
+    const cz = Math.sin(angle) * dist;
 
-    // Lower broader base smoke puffs (soft cool blue-gray shadow by Day; warm sunset glow at Dusk)
     const baseCount = 3 + Math.floor(rand() * 2);
     for (let b = 0; b < baseCount; b++) {
-      const mat = (i + b) % 2 === 0 ? cloudBaseMatA : cloudBaseMatB;
-      const puff = new THREE.Sprite(mat);
       const spreadX = (b - (baseCount - 1) * 0.5) * (42 + rand() * 24);
       const spreadZ = (rand() - 0.5) * 44;
-      puff.position.set(spreadX, -2 + (rand() - 0.5) * 6, spreadZ);
-      const wScale = 115 + rand() * 88;
-      const hScale = 44 + rand() * 28;
-      puff.scale.set(wScale, hScale, 1);
-      cloud.add(puff);
+      cloudBasePuffs.push({
+        x: cx + spreadX,
+        y: cy - 2 + (rand() - 0.5) * 6,
+        z: cz + spreadZ,
+        sx: 115 + rand() * 88,
+        sy: 44 + rand() * 28,
+      });
     }
 
-    // Upper billowy sun-facing crown puffs (crisp bright sunlit white by Day, directional offset toward sun)
-    const topPuffs: Array<{ sprite: THREE.Sprite; baseX: number; baseZ: number }> = [];
     const topCount = 2 + Math.floor(rand() * 3);
     for (let t = 0; t < topCount; t++) {
-      const mat = (i + t) % 2 === 0 ? cloudTopMatA : cloudTopMatB;
-      const puff = new THREE.Sprite(mat);
       const spreadX = (t - (topCount - 1) * 0.5) * (34 + rand() * 20);
       const spreadZ = (rand() - 0.5) * 34;
-      puff.position.set(spreadX, 14 + rand() * 12, spreadZ);
-      const wScale = 92 + rand() * 68;
-      const hScale = 40 + rand() * 24;
-      puff.scale.set(wScale, hScale, 1);
-      cloud.add(puff);
-      topPuffs.push({ sprite: puff, baseX: spreadX, baseZ: spreadZ });
+      cloudTopPuffs.push({
+        x: cx + spreadX,
+        y: cy + 14 + rand() * 12,
+        z: cz + spreadZ,
+        sx: 92 + rand() * 68,
+        sy: 40 + rand() * 24,
+      });
     }
-
-    cloudsGroup.add(cloud);
-    cloudEntries.push({ group: cloud, baseY, phase: rand() * Math.PI * 2, topPuffs });
   }
+
+  const cloudQuadGeo = trackGeo(new THREE.PlaneGeometry(1, 1));
+  const cloudBaseInst = new THREE.InstancedMesh(cloudQuadGeo, cloudBaseMat, cloudBasePuffs.length);
+  const cloudTopInst = new THREE.InstancedMesh(cloudQuadGeo, cloudTopMat, cloudTopPuffs.length);
+  const totalCloudBaseCount = cloudBasePuffs.length;
+  const totalCloudTopCount = cloudTopPuffs.length;
+  const cloudDummy = new THREE.Object3D();
+  for (let i = 0; i < cloudBasePuffs.length; i++) {
+    const p = cloudBasePuffs[i];
+    cloudDummy.position.set(p.x, p.y, p.z);
+    cloudDummy.rotation.set(0, 0, 0);
+    cloudDummy.scale.set(p.sx, p.sy, 1);
+    cloudDummy.updateMatrix();
+    cloudBaseInst.setMatrixAt(i, cloudDummy.matrix);
+  }
+  for (let i = 0; i < cloudTopPuffs.length; i++) {
+    const p = cloudTopPuffs[i];
+    cloudDummy.position.set(p.x, p.y, p.z);
+    cloudDummy.rotation.set(0, 0, 0);
+    cloudDummy.scale.set(p.sx, p.sy, 1);
+    cloudDummy.updateMatrix();
+    cloudTopInst.setMatrixAt(i, cloudDummy.matrix);
+  }
+  cloudBaseInst.instanceMatrix.needsUpdate = true;
+  cloudTopInst.instanceMatrix.needsUpdate = true;
+  cloudBaseInst.castShadow = false;
+  cloudTopInst.castShadow = false;
+  cloudBaseInst.frustumCulled = false;
+  cloudTopInst.frustumCulled = false;
+  cloudsGroup.add(cloudBaseInst, cloudTopInst);
   root.add(cloudsGroup);
 
   // Soft circular radial-glow star texture (guaranteed 100% round dots, never squares)
@@ -5059,6 +4967,146 @@ export function buildCoastalIslandWorld(
     root.add(skyBeaconInst);
   }
 
+  // === 10. GLOBAL STATIC LANDMARK AUTO-BATCHER (~350+ biome landmark meshes -> 2 draw calls!) & ZERO WORLD SHADOWS ===
+  // Collapses all remaining static opaque meshes across Dam, Airbase, Forest, Farm, Snow Alpine Village,
+  // Ski Lift pylons/cables, Summit Radar, Desert Outpost, Solar Station, Wind Turbine towers, Beach Piers,
+  // Resorts, Kiosks, Lighthouse & 3 Oil Rigs into ONE vertex-colored MeshLambertMaterial mesh + ONE window mesh!
+  {
+    root.updateMatrixWorld(true);
+    const skipSubtrees = new Set<THREE.Object3D>([
+      radarDish,
+      summitRadarDish,
+      windsock,
+      lighthouseBeamGroup,
+      cloudsGroup,
+      dispatchBeacon,
+      starGroup,
+      vegRootGroup,
+      ...campfireFlames,
+      campfireGlow,
+      ...bobbingVessels.map((v) => v.group),
+    ]);
+    const isUnderSkipped = (obj: THREE.Object3D): boolean => {
+      let cur: THREE.Object3D | null = obj;
+      while (cur) {
+        if (skipSubtrees.has(cur) || cityFixedMeshes.has(cur)) return true;
+        cur = cur.parent;
+      }
+      return false;
+    };
+
+    const windowMatSet = new Set<THREE.Material>([
+      chaletWindowMat,
+      hangarInteriorMat,
+      towerGlassMat,
+    ]);
+    const skipMatSet = new Set<THREE.Material>([
+      lhLampMat,
+      lampBulbMat,
+      oceanMat,
+      lakeMat,
+      riverMat,
+      shorelineFoamMat,
+      rigBeaconGlowMat,
+      rigFlareHaloMat,
+      rigFlareMat,
+      rigFlareCoreMat,
+      campfireGlowMat,
+      lighthouseBeamMat,
+    ]);
+
+    const landmarkSolidGeos: THREE.BufferGeometry[] = [];
+    const landmarkWindowGeos: THREE.BufferGeometry[] = [];
+    const landmarkBeaconGeos: THREE.BufferGeometry[] = [];
+    const bakedMeshes: THREE.Mesh[] = [];
+    const bakedRaycastSet = new Set<THREE.Object3D>();
+    const raycastLookup = new Set<THREE.Object3D>(raycastTargets);
+    const tmpCol = new THREE.Color();
+
+    root.traverse((obj) => {
+      if (!(obj instanceof THREE.Mesh) || obj instanceof THREE.InstancedMesh) return;
+      if (isUnderSkipped(obj)) return;
+      if (
+        obj === terrainMesh ||
+        obj === oceanMesh ||
+        obj === coastFoamMesh ||
+        obj === lakeMesh ||
+        obj === lakeFoamMesh ||
+        obj === pondWater ||
+        obj === riverMesh
+      ) {
+        return;
+      }
+      const mat = obj.material;
+      if (Array.isArray(mat)) return;
+      if (skipMatSet.has(mat)) return;
+      if (mat instanceof THREE.MeshBasicMaterial) return;
+      if (mat.transparent || mat.polygonOffset) return;
+      const anyMat = mat as THREE.MeshStandardMaterial;
+      if (anyMat.map || anyMat.vertexColors) return;
+
+      const cloned = obj.geometry.clone();
+      cloned.applyMatrix4(obj.matrixWorld);
+
+      if (windowMatSet.has(mat)) {
+        landmarkWindowGeos.push(cloned);
+      } else if (mat === skyRedBeaconMat || mat === rigRedBeaconMat) {
+        landmarkBeaconGeos.push(cloned);
+      } else {
+        tmpCol.copy(anyMat.color ?? new THREE.Color(0xffffff));
+        const count = cloned.attributes.position.count;
+        const colors = new Float32Array(count * 3);
+        for (let i = 0; i < count; i++) {
+          colors[i * 3] = tmpCol.r;
+          colors[i * 3 + 1] = tmpCol.g;
+          colors[i * 3 + 2] = tmpCol.b;
+        }
+        cloned.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        landmarkSolidGeos.push(cloned);
+      }
+
+      bakedMeshes.push(obj);
+      if (raycastLookup.has(obj)) {
+        bakedRaycastSet.add(obj);
+      }
+    });
+
+    for (let i = 0; i < bakedMeshes.length; i++) {
+      bakedMeshes[i].parent?.remove(bakedMeshes[i]);
+    }
+    if (bakedRaycastSet.size > 0) {
+      for (let i = raycastTargets.length - 1; i >= 0; i--) {
+        if (bakedRaycastSet.has(raycastTargets[i])) {
+          raycastTargets.splice(i, 1);
+        }
+      }
+    }
+
+    const mergedLandmarks = mergeNormalizedGeos(landmarkSolidGeos, true);
+    if (mergedLandmarks) {
+      const biomeSolidsMesh = new THREE.Mesh(mergedLandmarks, vertexColorLambertMat);
+      biomeSolidsMesh.castShadow = false;
+      biomeSolidsMesh.receiveShadow = true;
+      root.add(biomeSolidsMesh);
+      raycastTargets.push(biomeSolidsMesh);
+    }
+
+    const mergedLandmarkWins = mergeNormalizedGeos(landmarkWindowGeos, false);
+    if (mergedLandmarkWins) {
+      const biomeWindowsMesh = new THREE.Mesh(mergedLandmarkWins, chaletWindowMat);
+      biomeWindowsMesh.castShadow = false;
+      biomeWindowsMesh.receiveShadow = false;
+      root.add(biomeWindowsMesh);
+    }
+
+    const mergedLandmarkBeacons = mergeNormalizedGeos(landmarkBeaconGeos, false);
+    if (mergedLandmarkBeacons) {
+      const m = new THREE.Mesh(mergedLandmarkBeacons, skyRedBeaconMat);
+      m.castShadow = false;
+      root.add(m);
+    }
+  }
+
   let stormBlend = 0;
   let blizzardBlend = 0;
   let snowIntensity = 0;
@@ -5072,13 +5120,33 @@ export function buildCoastalIslandWorld(
   const skiLiftMid = liftStart.clone().add(liftEnd).multiplyScalar(0.5);
   const skiLiftSphere = new THREE.Sphere(skiLiftMid, liftStart.distanceTo(liftEnd) * 0.55 + 24);
   const rigVisibleFlags = OIL_RIGS.map(() => true);
+  const _animDummy = new THREE.Object3D();
 
-  // Scene-wide frustumCulled = true guarantee across all world meshes & groups
-  // (keeping frustumCulled = false strictly on dynamic camera-following weather/star/beacon particles)
-  const noCullSet = new Set<THREE.Object3D>([rainLines, starGroup, dispatchBeacon]);
+  // Scene-wide frustumCulled = true & ZERO castShadow on all world meshes (ONLY player helicopter casts shadows!)
+  const noCullSet = new Set<THREE.Object3D>([
+    rainLines,
+    starGroup,
+    dispatchBeacon,
+    cloudBaseInst,
+    cloudTopInst,
+    gondolaHangerInst,
+    gondolaCabinInst,
+    windRotorInst,
+    marinaHullInst,
+    marinaCabinInst,
+    rigFoamInst,
+    rigFlameInst,
+    rigCoreInst,
+    rigHaloInst,
+    osvInst,
+  ]);
   for (let i = 0; i < snowLayers.length; i++) noCullSet.add(snowLayers[i].points);
   starGroup.children.forEach((c) => noCullSet.add(c));
   root.traverse((obj) => {
+    if (obj instanceof THREE.Mesh) {
+      // Keep castShadow = true ONLY on the 4 merged city building/skyscraper facade meshes; all small props stay false
+      obj.castShadow = cityShadowCasters.has(obj);
+    }
     if (!noCullSet.has(obj)) {
       obj.frustumCulled = true;
     }
@@ -5168,16 +5236,25 @@ export function buildCoastalIslandWorld(
       (0.86 + Math.sin(elapsed * (2.1 + harshWeather * 1.7)) * 0.14);
 
     // Pre-test the 3 Oil Rigs against camera frustum once per frame
+    let anyRigInView = false;
     for (let r = 0; r < rigSpheres.length; r++) {
       rigVisibleFlags[r] = !cameraFrustum || cameraFrustum.intersectsSphere(rigSpheres[r]);
+      if (rigVisibleFlags[r]) anyRigInView = true;
     }
-    for (let i = 0; i < rigLegFoamRings.length; i++) {
-      const entry = rigLegFoamRings[i];
-      if (!rigVisibleFlags[entry.rigIdx]) continue;
-      const pulse =
-        1 +
-        Math.sin(elapsed * (2.1 + harshWeather * 2.6) + i * 1.4) * (0.16 + harshWeather * 0.08);
-      entry.mesh.scale.setScalar(pulse);
+    if (anyRigInView) {
+      for (let i = 0; i < rigLegFoamCoords.length; i++) {
+        const f = rigLegFoamCoords[i];
+        if (!rigVisibleFlags[f.rigIdx]) continue;
+        const pulse =
+          1 +
+          Math.sin(elapsed * (2.1 + harshWeather * 2.6) + i * 1.4) * (0.16 + harshWeather * 0.08);
+        _animDummy.position.set(f.x, f.y, f.z);
+        _animDummy.rotation.set(0, 0, 0);
+        _animDummy.scale.setScalar(pulse);
+        _animDummy.updateMatrix();
+        rigFoamInst.setMatrixAt(i, _animDummy.matrix);
+      }
+      rigFoamInst.instanceMatrix.needsUpdate = true;
     }
 
     radarDish.rotation.y += dt * 1.45;
@@ -5188,13 +5265,23 @@ export function buildCoastalIslandWorld(
     cloudsGroup.rotation.y +=
       dt * THREE.MathUtils.lerp(0.0035, 0.014, Math.max(stormBlend, blizzardBlend * 0.72));
 
-    // O CONE: Rotate Wind Farm turbine blades whenever inside camera frustum (always visible across desert)
+    // O CONE: Rotate Instanced Wind Farm turbine rotors whenever inside camera frustum
     const windSpeed =
       weather === 'STORM' ? 3.25 : weather === 'BLIZZARD' ? 2.35 : weather === 'FOG' ? 0.65 : 1.18;
+    let windUpdated = false;
     for (let i = 0; i < windTurbineRotors.length; i++) {
       const wt = windTurbineRotors[i];
       if (cameraFrustum && !cameraFrustum.intersectsSphere(wt.sphere)) continue;
-      wt.hub.rotation.z -= dt * windSpeed * wt.speedMult;
+      wt.roll -= dt * windSpeed * wt.speedMult;
+      _animDummy.position.copy(wt.hubPos);
+      _animDummy.rotation.set(0, wt.yaw, wt.roll, 'YXZ');
+      _animDummy.scale.setScalar(1);
+      _animDummy.updateMatrix();
+      windRotorInst.setMatrixAt(i, _animDummy.matrix);
+      windUpdated = true;
+    }
+    if (windUpdated) {
+      windRotorInst.instanceMatrix.needsUpdate = true;
     }
 
     // Rotate Costa do Sol Lighthouse volumetric beam (bright at Dusk, Night, Storm & Blizzard)
@@ -5222,6 +5309,49 @@ export function buildCoastalIslandWorld(
       v.group.rotation.z = Math.sin(elapsed * (1.2 + harshWeather * 0.6) + v.phase) * 0.032 * vesselWaveMult;
     }
 
+    // Instanced Marina Boats gentle bobbing (only when Costa do Sol is nearby)
+    let marinaUpdated = false;
+    for (let i = 0; i < marinaBoatEntries.length; i++) {
+      const mb = marinaBoatEntries[i];
+      if (cameraPos) {
+        const dx = mb.x - cameraPos.x;
+        const dz = mb.z - cameraPos.z;
+        if (dx * dx + dz * dz > 850 * 850) continue;
+      }
+      const bobY = mb.baseY + Math.sin(elapsed * (1.65 + harshWeather * 0.75) + mb.phase) * 0.2 * vesselWaveMult;
+      const rollZ = Math.sin(elapsed * (1.2 + harshWeather * 0.6) + mb.phase) * 0.032 * vesselWaveMult;
+      _animDummy.position.set(mb.x, bobY + 0.45, mb.z);
+      _animDummy.rotation.set(0, mb.yaw, rollZ, 'YXZ');
+      _animDummy.scale.setScalar(1);
+      _animDummy.updateMatrix();
+      marinaHullInst.setMatrixAt(i, _animDummy.matrix);
+
+      _animDummy.position.set(mb.x - Math.sin(mb.yaw) * 0.6, bobY + 1.45, mb.z - Math.cos(mb.yaw) * 0.6);
+      _animDummy.updateMatrix();
+      marinaCabinInst.setMatrixAt(i, _animDummy.matrix);
+      marinaUpdated = true;
+    }
+    if (marinaUpdated) {
+      marinaHullInst.instanceMatrix.needsUpdate = true;
+      marinaCabinInst.instanceMatrix.needsUpdate = true;
+    }
+
+    // Instanced Oil Rig OSVs bobbing when rigs are in view
+    if (anyRigInView) {
+      for (let i = 0; i < osvEntries.length; i++) {
+        if (!rigVisibleFlags[i]) continue;
+        const o = osvEntries[i];
+        const bobY = o.baseY + Math.sin(elapsed * (1.65 + harshWeather * 0.75) + o.phase) * 0.34 * vesselWaveMult;
+        const rollZ = Math.sin(elapsed * (1.2 + harshWeather * 0.6) + o.phase) * 0.032 * vesselWaveMult;
+        _animDummy.position.set(o.x, bobY, o.z);
+        _animDummy.rotation.set(0, o.yaw, rollZ, 'YXZ');
+        _animDummy.scale.setScalar(1);
+        _animDummy.updateMatrix();
+        osvInst.setMatrixAt(i, _animDummy.matrix);
+      }
+      osvInst.instanceMatrix.needsUpdate = true;
+    }
+
     // O CONE: Forest campsite flickering campfire (pause when outside frustum or > 480m)
     const campInView =
       (!cameraFrustum || cameraFrustum.intersectsSphere(campSphere)) &&
@@ -5235,41 +5365,21 @@ export function buildCoastalIslandWorld(
         (0.18 + Math.max(nightFactor, stormBlend * 0.65, blizzardBlend * 0.5) * 0.26) * campFlicker;
     }
 
-    // O CONE: Overcast cloud expansion + sun-shift (skip cloud groups outside camera frustum!)
+    // Zero-CPU-loop Instanced Cloud Shader Uniforms (2 draw calls total!)
     const overcastMix = Math.max(stormBlend, blizzardBlend * 0.76);
-    const cloudScaleXZ = THREE.MathUtils.lerp(1.0, 1.34, overcastMix);
-    const cloudScaleY = THREE.MathUtils.lerp(1.0, 1.42, overcastMix);
+    cloudBillboardUniforms.uCloudScaleXZ.value = THREE.MathUtils.lerp(1.0, 1.34, overcastMix);
+    cloudBillboardUniforms.uCloudScaleY.value = THREE.MathUtils.lerp(1.0, 1.42, overcastMix);
     const cloudDropY = stormBlend * 22 + blizzardBlend * 15;
+    cloudsGroup.position.y = -cloudDropY + Math.sin(elapsed * 0.25) * 1.5;
+
     const sunShiftMag = (1 - nightFactor) * (1 - overcastMix) * 8.5;
     const cosCRot = Math.cos(-cloudsGroup.rotation.y);
     const sinCRot = Math.sin(-cloudsGroup.rotation.y);
-    const cosWorldRot = Math.cos(cloudsGroup.rotation.y);
-    const sinWorldRot = Math.sin(cloudsGroup.rotation.y);
-    const localSunX = (activeSunDir.x * cosCRot - activeSunDir.z * sinCRot) * sunShiftMag;
-    const localSunZ = (activeSunDir.x * sinCRot + activeSunDir.z * cosCRot) * sunShiftMag;
-
-    for (let i = 0; i < cloudEntries.length; i++) {
-      const c = cloudEntries[i];
-      if (!c.group.visible) continue;
-      if (cameraFrustum) {
-        const lx = c.group.position.x;
-        const lz = c.group.position.z;
-        _tmpCullSphere.center.set(
-          lx * cosWorldRot + lz * sinWorldRot,
-          c.baseY - cloudDropY,
-          -lx * sinWorldRot + lz * cosWorldRot
-        );
-        _tmpCullSphere.radius = 195;
-        if (!cameraFrustum.intersectsSphere(_tmpCullSphere)) continue;
-      }
-      c.group.position.y = c.baseY - cloudDropY + Math.sin(elapsed * 0.25 + c.phase) * 1.8;
-      c.group.scale.set(cloudScaleXZ, cloudScaleY, cloudScaleXZ);
-      for (let t = 0; t < c.topPuffs.length; t++) {
-        const tp = c.topPuffs[t];
-        tp.sprite.position.x = tp.baseX + localSunX;
-        tp.sprite.position.z = tp.baseZ + localSunZ;
-      }
-    }
+    cloudTopInst.position.set(
+      (activeSunDir.x * cosCRot - activeSunDir.z * sinCRot) * sunShiftMag,
+      0,
+      (activeSunDir.x * sinCRot + activeSunDir.z * cosCRot) * sunShiftMag
+    );
 
     // Building & Alpine Chalet windows: crisp warm contrast during Dusk, Night, Storm & Blizzard
     const weatherGlow = Math.max(stormBlend, blizzardBlend * 0.68);
@@ -5321,30 +5431,51 @@ export function buildCoastalIslandWorld(
       skyRedPulse *
       (0.85 + Math.max(duskFactor * 1.5 + nightFactor * 3.6, stormBlend * 3.1, blizzardBlend * 2.4));
 
-    // O CONE: Oil Rig Flares animate only for rigs currently inside camera frustum
+    // O CONE: Instanced Oil Rig Flares animate only for rigs currently inside camera frustum
     const flareStormScale = 1 + harshWeather * 0.24;
     let avgFlareFlicker = 0.9;
-    for (let i = 0; i < rigFlares.length; i++) {
-      const rf = rigFlares[i];
-      if (!rigVisibleFlags[rf.rigIdx]) continue;
-      const f =
-        0.82 +
-        Math.sin(elapsed * (16.5 + harshWeather * 8.0) + rf.phase) * (0.18 + harshWeather * 0.08) +
-        Math.cos(elapsed * 23.1 + rf.phase * 1.4) * 0.12;
-      if (i === 0) avgFlareFlicker = f;
-      rf.flame.scale.set(
-        (0.92 + f * 0.18) * flareStormScale,
-        f * 1.18 * flareStormScale,
-        (0.92 + f * 0.18) * flareStormScale
-      );
-      rf.core.scale.set(0.95 * flareStormScale, (0.9 + f * 0.2) * flareStormScale, 0.95 * flareStormScale);
-      rf.halo.scale.setScalar((0.95 + f * 0.26) * (1 + harshWeather * 0.35));
+    if (anyRigInView) {
+      for (let i = 0; i < rigFlareCoords.length; i++) {
+        const rf = rigFlareCoords[i];
+        if (!rigVisibleFlags[rf.rigIdx]) continue;
+        const f =
+          0.82 +
+          Math.sin(elapsed * (16.5 + harshWeather * 8.0) + rf.phase) * (0.18 + harshWeather * 0.08) +
+          Math.cos(elapsed * 23.1 + rf.phase * 1.4) * 0.12;
+        if (i === 0) avgFlareFlicker = f;
+        _animDummy.rotation.set(0, 0, 0);
+        _animDummy.position.set(rf.x, rf.y + 17.5, rf.z);
+        _animDummy.scale.set(
+          (0.92 + f * 0.18) * flareStormScale,
+          f * 1.18 * flareStormScale,
+          (0.92 + f * 0.18) * flareStormScale
+        );
+        _animDummy.updateMatrix();
+        rigFlameInst.setMatrixAt(i, _animDummy.matrix);
+
+        _animDummy.position.set(rf.x, rf.y + 16.0, rf.z);
+        _animDummy.scale.set(
+          0.95 * flareStormScale,
+          (0.9 + f * 0.2) * flareStormScale,
+          0.95 * flareStormScale
+        );
+        _animDummy.updateMatrix();
+        rigCoreInst.setMatrixAt(i, _animDummy.matrix);
+
+        _animDummy.position.set(rf.x, rf.y + 18.2, rf.z);
+        _animDummy.scale.setScalar((0.95 + f * 0.26) * (1 + harshWeather * 0.35));
+        _animDummy.updateMatrix();
+        rigHaloInst.setMatrixAt(i, _animDummy.matrix);
+      }
+      rigFlameInst.instanceMatrix.needsUpdate = true;
+      rigCoreInst.instanceMatrix.needsUpdate = true;
+      rigHaloInst.instanceMatrix.needsUpdate = true;
     }
     rigFlareHaloMat.opacity =
       (0.22 + Math.max(duskFactor * 0.24 + nightFactor * 0.42, stormBlend * 0.38, blizzardBlend * 0.3)) *
       avgFlareFlicker;
 
-    // O CONE: Smoothly glide 14 ski lift gondolas whenever ski mountain is inside frustum
+    // O CONE: Smoothly glide 14 instanced ski lift gondolas whenever ski mountain is inside frustum
     const skiLiftInView = !cameraFrustum || cameraFrustum.intersectsSphere(skiLiftSphere);
     if (skiLiftInView) {
       const segCount = liftTowerTops.length - 1;
@@ -5357,14 +5488,24 @@ export function buildCoastalIslandWorld(
         const localT = scaled - segIdx;
         const p0 = liftTowerTops[segIdx];
         const p1 = liftTowerTops[segIdx + 1];
-        g.group.position.set(
+        _animDummy.position.set(
           THREE.MathUtils.lerp(p0.x, p1.x, localT) + liftRight.x * g.side * 2.5,
           THREE.MathUtils.lerp(p0.y, p1.y, localT),
           THREE.MathUtils.lerp(p0.z, p1.z, localT) + liftRight.z * g.side * 2.5
         );
-        g.group.rotation.z =
-          Math.sin(elapsed * 1.8 + i) * (0.05 + stormBlend * 0.07 + blizzardBlend * 0.085);
+        _animDummy.rotation.set(
+          0,
+          liftYaw,
+          Math.sin(elapsed * 1.8 + i) * (0.05 + stormBlend * 0.07 + blizzardBlend * 0.085),
+          'YXZ'
+        );
+        _animDummy.scale.setScalar(1);
+        _animDummy.updateMatrix();
+        gondolaHangerInst.setMatrixAt(i, _animDummy.matrix);
+        gondolaCabinInst.setMatrixAt(i, _animDummy.matrix);
       }
+      gondolaHangerInst.instanceMatrix.needsUpdate = true;
+      gondolaCabinInst.instanceMatrix.needsUpdate = true;
     }
 
     // STRICT RULE: Stars are 100% invisible during Day, Dusk, Storm, and Blizzard overcast.
@@ -5379,7 +5520,7 @@ export function buildCoastalIslandWorld(
       starMaterials[i].opacity = starOpacity;
     }
 
-    // Soft cotton-smoke Sprite clouds tinted dynamically for Day / Dusk / Night / Storm / Blizzard
+    // Instanced billboard clouds tinted dynamically for Day / Dusk / Night / Storm / Blizzard
     tmpCloudTopColor.copy(cloudTopDayColor).lerp(cloudTopNightColor, nightFactor);
     tmpCloudBotColor.copy(cloudBotDayColor).lerp(cloudBotNightColor, nightFactor);
     if (duskFactor > 0.01) {
@@ -5415,15 +5556,10 @@ export function buildCoastalIslandWorld(
       0.84,
       stormBlend
     );
-    cloudTopMatA.color.copy(tmpCloudTopColor);
-    cloudTopMatB.color.copy(tmpCloudTopColor);
-    cloudBaseMatA.color.copy(tmpCloudBotColor);
-    cloudBaseMatB.color.copy(tmpCloudBotColor);
-
-    cloudTopMatA.opacity = topOpacity;
-    cloudTopMatB.opacity = topOpacity * 0.94;
-    cloudBaseMatA.opacity = Math.min(0.92, botOpacity);
-    cloudBaseMatB.opacity = Math.min(0.88, botOpacity * 0.94);
+    cloudTopMat.color.copy(tmpCloudTopColor);
+    cloudBaseMat.color.copy(tmpCloudBotColor);
+    cloudTopMat.opacity = topOpacity;
+    cloudBaseMat.opacity = Math.min(0.92, botOpacity);
 
     // Dense high-speed wind-slanted 3D rain streaks around camera/helicopter (frustum-trimmed behind camera!)
     const hasCamCone = cameraPos !== undefined && camForward !== undefined;
@@ -5618,16 +5754,11 @@ export function buildCoastalIslandWorld(
 
   const setGraphicsQuality = (quality: GraphicsQuality) => {
     currentQuality = quality;
-    const allowGiantBuildingShadows = quality === 'ultra' || quality === 'high';
-    if (giantSkyscraperMesh) {
-      giantSkyscraperMesh.castShadow = allowGiantBuildingShadows;
-    }
     qualityParticleScale =
       quality === 'ultra' ? 1.0 : quality === 'high' ? 0.92 : quality === 'medium' ? 0.68 : 0.45;
-    for (let i = 0; i < cloudEntries.length; i++) {
-      cloudEntries[i].group.visible =
-        quality === 'low' ? i % 2 === 0 : quality === 'medium' ? i % 4 !== 3 : true;
-    }
+    const cloudFrac = quality === 'low' ? 0.55 : quality === 'medium' ? 0.78 : 1.0;
+    cloudBaseInst.count = Math.max(12, Math.floor(totalCloudBaseCount * cloudFrac));
+    cloudTopInst.count = Math.max(12, Math.floor(totalCloudTopCount * cloudFrac));
   };
 
   return {

@@ -12,11 +12,15 @@ function finalizeColorTexture(
   canvas: HTMLCanvasElement,
   maxAnisotropy: number,
   repeatX = 1,
-  repeatY = 1
+  repeatY = 1,
+  isLinearData = false
 ): THREE.CanvasTexture {
   const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = maxAnisotropy;
+  tex.colorSpace = isLinearData ? THREE.NoColorSpace : THREE.SRGBColorSpace;
+  tex.anisotropy = Math.max(1, Math.min(maxAnisotropy, 8));
+  tex.generateMipmaps = true;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
   if (repeatX !== 1 || repeatY !== 1) {
     tex.wrapS = THREE.RepeatWrapping;
     tex.wrapT = THREE.RepeatWrapping;
@@ -202,27 +206,37 @@ export function createFacadeTextures(
   accentHex: string,
   style: 'office' | 'residential' | 'hospital' | 'civic' | 'tower',
   variantSeed = 0
-): { map: THREE.CanvasTexture; emissiveMap: THREE.CanvasTexture } {
-  const [canvas, ctx] = makeCanvas(256, 512);
-  const [emCanvas, emCtx] = makeCanvas(256, 512);
+): {
+  map: THREE.CanvasTexture;
+  emissiveMap: THREE.CanvasTexture;
+  roughnessMap: THREE.CanvasTexture;
+} {
+  const size = 512;
+  const [canvas, ctx] = makeCanvas(size, size);
+  const [emCanvas, emCtx] = makeCanvas(size, size);
+  const [roughCanvas, roughCtx] = makeCanvas(size, size);
 
-  // Day base wall & dark night emissive base
+  // Day base wall, dark night emissive base & matte wall roughness (0.78 -> ~200/255)
   ctx.fillStyle = baseHex;
-  ctx.fillRect(0, 0, 256, 512);
+  ctx.fillRect(0, 0, size, size);
 
   emCtx.fillStyle = '#000000';
-  emCtx.fillRect(0, 0, 256, 512);
+  emCtx.fillRect(0, 0, size, size);
 
-  // Subtle vertical architectural pilasters/ribs for cleaner modern low-poly read
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
-  ctx.fillRect(0, 0, 10, 512);
-  ctx.fillStyle = 'rgba(15, 23, 42, 0.12)';
-  ctx.fillRect(246, 0, 10, 512);
+  const wallRoughVal = style === 'tower' ? 165 : style === 'office' ? 185 : 212;
+  roughCtx.fillStyle = `rgb(${wallRoughVal}, ${wallRoughVal}, ${wallRoughVal})`;
+  roughCtx.fillRect(0, 0, size, size);
+
+  // Subtle vertical architectural pilasters/ribs for crisp modern skyline read
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.10)';
+  ctx.fillRect(0, 0, 18, size);
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.14)';
+  ctx.fillRect(size - 18, 0, 18, size);
 
   const rows = style === 'tower' ? 15 : style === 'office' ? 12 : 10;
   const cols = style === 'residential' ? 4 : style === 'tower' ? 6 : 5;
-  const rowH = 512 / rows;
-  const colW = 256 / cols;
+  const rowH = size / rows;
+  const colW = size / cols;
 
   // Deterministic hash helper for natural lit/unlit window clusters
   const hash = (r: number, c: number, salt: number): number => {
@@ -234,82 +248,93 @@ export function createFacadeTextures(
   for (let r = 0; r < rows; r++) {
     const y = r * rowH;
 
-    // Ground floor lobby band (warmly illuminated at night)
+    // Ground floor lobby band (warmly illuminated at night + glossy glass front)
     if (r === rows - 1) {
       ctx.fillStyle = accentHex;
-      ctx.fillRect(0, y, 256, rowH);
+      ctx.fillRect(0, y, size, rowH);
       ctx.fillStyle = '#182738';
-      ctx.fillRect(16, y + 9, 224, rowH - 13);
+      ctx.fillRect(32, y + 9, size - 64, rowH - 13);
+      roughCtx.fillStyle = 'rgb(30, 30, 30)';
+      roughCtx.fillRect(32, y + 9, size - 64, rowH - 13);
+
       // Lobby glass mullions
       ctx.fillStyle = accentHex;
-      ctx.fillRect(84, y + 9, 6, rowH - 13);
-      ctx.fillRect(166, y + 9, 6, rowH - 13);
+      ctx.fillRect(168, y + 9, 12, rowH - 13);
+      ctx.fillRect(332, y + 9, 12, rowH - 13);
+      roughCtx.fillStyle = `rgb(${wallRoughVal}, ${wallRoughVal}, ${wallRoughVal})`;
+      roughCtx.fillRect(168, y + 9, 12, rowH - 13);
+      roughCtx.fillRect(332, y + 9, 12, rowH - 13);
 
       emCtx.fillStyle = '#ffd68a';
-      emCtx.fillRect(20, y + 13, 60, rowH - 19);
-      emCtx.fillRect(94, y + 13, 68, rowH - 19);
-      emCtx.fillRect(176, y + 13, 60, rowH - 19);
+      emCtx.fillRect(40, y + 13, 120, rowH - 19);
+      emCtx.fillRect(188, y + 13, 136, rowH - 19);
+      emCtx.fillRect(352, y + 13, 120, rowH - 19);
       continue;
     }
 
     // Horizontal floor slab / spandrel ledge
-    ctx.fillStyle = style === 'tower' ? 'rgba(15, 23, 42, 0.22)' : 'rgba(15, 23, 42, 0.11)';
-    ctx.fillRect(0, y, 256, style === 'tower' ? 4 : 3);
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.12)';
-    ctx.fillRect(0, y + 3, 256, 2);
+    ctx.fillStyle = style === 'tower' ? 'rgba(15, 23, 42, 0.24)' : 'rgba(15, 23, 42, 0.13)';
+    ctx.fillRect(0, y, size, style === 'tower' ? 4 : 3);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.14)';
+    ctx.fillRect(0, y + 3, size, 2);
 
     // Hospital red cross accent floor
     if (style === 'hospital' && r === 1) {
       ctx.fillStyle = '#dc2626';
-      ctx.fillRect(0, y + 5, 256, rowH - 10);
+      ctx.fillRect(0, y + 5, size, rowH - 10);
       emCtx.fillStyle = '#ff4b4b';
-      emCtx.fillRect(10, y + 9, 236, rowH - 18);
+      emCtx.fillRect(20, y + 9, size - 40, rowH - 18);
       continue;
     }
 
     // Floor occupancy bias (some office floors mostly lit for late shift, others mostly dark)
     const floorBias = hash(r, 99, 17);
     const floorActive = style === 'office' || style === 'tower' ? floorBias > 0.28 : true;
+    const glassRoughVal = style === 'tower' ? 28 : style === 'office' ? 38 : 52;
 
     for (let c = 0; c < cols; c++) {
       const x = c * colW;
-      const padX = style === 'tower' ? 4 : 7;
+      const padX = style === 'tower' ? 8 : 13;
       const padY = style === 'tower' ? 5 : 8;
       const winW = colW - padX * 2;
       const winH = rowH - padY * 2;
 
-      // Recessed window sill & frame
-      ctx.fillStyle = 'rgba(15, 23, 42, 0.38)';
-      ctx.fillRect(x + padX - 2, y + padY - 2, winW + 4, winH + 4);
+      // Recessed window sill & architectural frame
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.42)';
+      ctx.fillRect(x + padX - 3, y + padY - 2, winW + 6, winH + 4);
 
       const hVal = hash(r, c, 3);
       const toneVal = hash(r, c, 29);
 
-      // Day glass color with subtle sky reflection variation
+      // Day glass color with subtle sky/sunset reflection variation
       ctx.fillStyle =
-        hVal < 0.12
-          ? '#82b5d4'
-          : hVal < 0.26
+        hVal < 0.14
+          ? '#8ec0de'
+          : hVal < 0.30
             ? '#5293b8'
             : windowHex;
       ctx.fillRect(x + padX, y + padY, winW, winH);
 
-      // Subtle diagonal daylight glass specular glint
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.13)';
+      // Glossy low-roughness glass pane in roughnessMap for realistic sunset reflection
+      roughCtx.fillStyle = `rgb(${glassRoughVal}, ${glassRoughVal}, ${glassRoughVal})`;
+      roughCtx.fillRect(x + padX, y + padY, winW, winH);
+
+      // Crisp diagonal daylight glass specular glint
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.16)';
       ctx.beginPath();
       ctx.moveTo(x + padX, y + padY);
-      ctx.lineTo(x + padX + winW * 0.58, y + padY);
+      ctx.lineTo(x + padX + winW * 0.56, y + padY);
       ctx.lineTo(x + padX, y + padY + winH * 0.62);
       ctx.closePath();
       ctx.fill();
 
-      // Subtle window mullion / residential balcony rail
+      // Fine architectural window mullion / residential balcony rail
       if (style === 'residential') {
-        ctx.fillStyle = 'rgba(15, 23, 42, 0.28)';
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.32)';
         ctx.fillRect(x + padX, y + padY + winH * 0.62, winW, 2);
-      } else if (style === 'office' || style === 'civic') {
-        ctx.fillStyle = 'rgba(15, 23, 42, 0.22)';
-        ctx.fillRect(x + padX + winW * 0.48, y + padY, 2, winH);
+      } else if (style === 'office' || style === 'civic' || style === 'tower') {
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.26)';
+        ctx.fillRect(x + padX + winW * 0.49, y + padY, 3, winH);
       }
 
       // Organic night window illumination: realistic mix of lit warm/cool/dim & unlit dark windows
@@ -330,20 +355,15 @@ export function createFacadeTextures(
         if (style === 'hospital') {
           emCtx.fillStyle = toneVal > 0.35 ? '#fff2d1' : '#d7ecff';
         } else if (toneVal < 0.14) {
-          // Rare cool-white office monitor / TV room accent
           emCtx.fillStyle = '#bfe3ff';
         } else if (toneVal < 0.34) {
-          // Soft dim amber (curtains drawn)
           emCtx.fillStyle = '#996f34';
         } else if (toneVal < 0.68) {
-          // Warm golden interior
           emCtx.fillStyle = '#ffcb6b';
         } else {
-          // Bright warm incandescent
           emCtx.fillStyle = '#fff0c2';
         }
 
-        // Occasionally half-drawn blind effect in residential/office windows
         const blindFrac = style === 'residential' && toneVal > 0.78 ? 0.55 : 1.0;
         emCtx.fillRect(
           x + padX,
@@ -356,8 +376,9 @@ export function createFacadeTextures(
   }
 
   return {
-    map: finalizeColorTexture(canvas, maxAnisotropy),
-    emissiveMap: finalizeColorTexture(emCanvas, maxAnisotropy),
+    map: finalizeColorTexture(canvas, maxAnisotropy, 1, 1, false),
+    emissiveMap: finalizeColorTexture(emCanvas, maxAnisotropy, 1, 1, false),
+    roughnessMap: finalizeColorTexture(roughCanvas, maxAnisotropy, 1, 1, true),
   };
 }
 
