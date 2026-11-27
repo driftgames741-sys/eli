@@ -219,21 +219,19 @@ export function buildCoastalIslandWorld(
   const skyRedBeaconCoords: Array<{ x: number; y: number; z: number; r: number }> = [];
 
   // Night-illuminated material collections updated smoothly by nightFactor (0..1)
-  const nightWindowMats: THREE.MeshStandardMaterial[] = [];
+  const nightWindowMats: Array<THREE.MeshLambertMaterial | THREE.MeshStandardMaterial> = [];
   const padBeaconMatA = trackMat(
-    new THREE.MeshStandardMaterial({
+    new THREE.MeshLambertMaterial({
       color: 0xfef08a,
       emissive: 0xf59e0b,
       emissiveIntensity: 0.9,
-      roughness: 0.25,
     })
   );
   const padBeaconMatB = trackMat(
-    new THREE.MeshStandardMaterial({
+    new THREE.MeshLambertMaterial({
       color: 0xfef08a,
       emissive: 0x38bdf8,
       emissiveIntensity: 0.9,
-      roughness: 0.25,
     })
   );
 
@@ -385,10 +383,8 @@ export function buildCoastalIslandWorld(
   terrainGeo.computeVertexNormals();
 
   const terrainMat = trackMat(
-    new THREE.MeshStandardMaterial({
+    new THREE.MeshLambertMaterial({
       vertexColors: true,
-      roughness: 0.94,
-      metalness: 0.0,
       flatShading: true,
     })
   );
@@ -739,31 +735,21 @@ export function buildCoastalIslandWorld(
     root.add(riverMesh);
   }
 
-  // Shared Architectural Materials (high roughness for crisp daytime readability)
-  const concreteMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0x9aa8b8, roughness: 0.92, metalness: 0.0 })
+  // Shared Architectural Materials (lightweight MeshLambertMaterial for maximum GPU FPS)
+  const vertexColorLambertMat = trackMat(
+    new THREE.MeshLambertMaterial({ color: 0xffffff, vertexColors: true })
   );
-  const darkConcreteMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0x4f5d6e, roughness: 0.94, metalness: 0.0 })
-  );
-  const foamMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0xcbe9f8, roughness: 0.52, metalness: 0.0 })
-  );
-  const timberMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0x723e1d, roughness: 0.92, metalness: 0.0 })
-  );
-  const warmTimberMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0x99653a, roughness: 0.9, metalness: 0.0 })
-  );
-  const sandstoneMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0xb5673b, roughness: 0.94, metalness: 0.0 })
-  );
+  const concreteMat = trackMat(new THREE.MeshLambertMaterial({ color: 0x9aa8b8 }));
+  const darkConcreteMat = trackMat(new THREE.MeshLambertMaterial({ color: 0x4f5d6e }));
+  const foamMat = trackMat(new THREE.MeshLambertMaterial({ color: 0xcbe9f8 }));
+  const timberMat = trackMat(new THREE.MeshLambertMaterial({ color: 0x723e1d }));
+  const warmTimberMat = trackMat(new THREE.MeshLambertMaterial({ color: 0x99653a }));
+  const sandstoneMat = trackMat(new THREE.MeshLambertMaterial({ color: 0xb5673b }));
   const chaletWindowMat = trackMat(
-    new THREE.MeshStandardMaterial({
+    new THREE.MeshLambertMaterial({
       color: 0x1e293b,
       emissive: 0xffc864,
       emissiveIntensity: 0,
-      roughness: 0.22,
     })
   );
   nightWindowMats.push(chaletWindowMat);
@@ -838,12 +824,23 @@ export function buildCoastalIslandWorld(
     });
   };
 
-  // === 3B. 2x EXPANDED WEST HARBOR SEAWALL, CONTAINER PORT TERMINAL (6 CRANES + 2 WAREHOUSES + 2 SHIPS) ===
+  // === 3B. 2x EXPANDED WEST HARBOR SEAWALL & CONTAINER PORT (CONSOLIDATED INTO 2 STATIC + 4 SHIP DRAW CALLS!) ===
   const portGroup = new THREE.Group();
   const bobbingVessels: Array<{ group: THREE.Object3D; baseY: number; phase: number; amp: number }> = [];
 
-  // Merged Concrete seawall segments hugging the 2x West Harbor Bay coastline (40 draw calls -> 1!)
-  const seawallGeos: THREE.BufferGeometry[] = [];
+  const skyRedBeaconMat = trackMat(
+    new THREE.MeshLambertMaterial({
+      color: 0xff2a2a,
+      emissive: 0xff1e1e,
+      emissiveIntensity: 1.4,
+    })
+  );
+  const craneRedMat = trackMat(new THREE.MeshLambertMaterial({ color: 0xc2382c }));
+  const shipBridgeMat = trackMat(new THREE.MeshLambertMaterial({ color: 0xf1f5f9 }));
+
+  // Merge ALL static Port structures (40 seawall blocks + quay slab + yellow edge + 2 warehouses + 6 gantry cranes)
+  // into ONE single vertex-colored MeshLambertMaterial draw call!
+  const portStaticGeos: THREE.BufferGeometry[] = [];
   const seawallSteps = 40;
   const seawallStartAng = 2.58;
   const seawallEndAng = Math.PI * 2 - 2.48; // wraps through PI cleanly
@@ -858,67 +855,70 @@ export function buildCoastalIslandWorld(
     const z1 = Math.sin(a1) * r1;
     const len = Math.hypot(x1 - x0, z1 - z0) + 2.4;
     pushTransformedGeo(
-      seawallGeos,
+      portStaticGeos,
       new THREE.BoxGeometry(len, 5.6, 8.2),
       (x0 + x1) * 0.5,
       1.2,
       (z0 + z1) * 0.5,
       0,
       -Math.atan2(z1 - z0, x1 - x0),
-      0
+      0,
+      1,
+      1,
+      1,
+      0x9aa8b8
     );
   }
-  const mergedSeawallGeo = mergeNormalizedGeos(seawallGeos);
-  if (mergedSeawallGeo) {
-    const seawallMesh = new THREE.Mesh(mergedSeawallGeo, concreteMat);
-    seawallMesh.receiveShadow = true;
-    seawallMesh.castShadow = false;
-    portGroup.add(seawallMesh);
-  }
 
-  // Main Concrete Port Quay jutting into West Harbor Bay (126m x 430m — 2x expanded)
-  const quaySlab = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(126, 5.4, 430)), darkConcreteMat);
-  quaySlab.position.set(PORT_QUAY_POS.x + 28, PORT_QUAY_POS.dockY - 2.7, PORT_QUAY_POS.z);
-  quaySlab.receiveShadow = true;
-  quaySlab.castShadow = true;
-  portGroup.add(quaySlab);
-  raycastTargets.push(quaySlab);
-
-  const quayEdge = new THREE.Mesh(
-    trackGeo(new THREE.BoxGeometry(2.6, 0.72, 430)),
-    trackMat(new THREE.MeshStandardMaterial({ color: 0xeab308, roughness: 0.85, metalness: 0.0 }))
+  // Main Concrete Port Quay Slab + Yellow Safety Edge
+  pushTransformedGeo(
+    portStaticGeos,
+    new THREE.BoxGeometry(126, 5.4, 430),
+    PORT_QUAY_POS.x + 28,
+    PORT_QUAY_POS.dockY - 2.7,
+    PORT_QUAY_POS.z,
+    0,
+    0,
+    0,
+    1,
+    1,
+    1,
+    0x4f5d6e
   );
-  quayEdge.position.set(PORT_QUAY_POS.x - 34, PORT_QUAY_POS.dockY + 0.15, PORT_QUAY_POS.z);
-  portGroup.add(quayEdge);
+  pushTransformedGeo(
+    portStaticGeos,
+    new THREE.BoxGeometry(2.6, 0.72, 430),
+    PORT_QUAY_POS.x - 34,
+    PORT_QUAY_POS.dockY + 0.15,
+    PORT_QUAY_POS.z,
+    0,
+    0,
+    0,
+    1,
+    1,
+    1,
+    0xeab308
+  );
 
   // Two Large Port Logistics Warehouses (North & South Terminal)
-  const portWarehouseMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0x7a8a9c, roughness: 0.9, metalness: 0.0 })
-  );
-  const portWarehouseGeo = trackGeo(new THREE.BoxGeometry(44, 12.5, 80));
   for (const wz of [-155, 135]) {
-    const wh = new THREE.Mesh(portWarehouseGeo, portWarehouseMat);
-    wh.position.set(-926, 3.0 + 6.25, wz);
-    wh.castShadow = true;
-    wh.receiveShadow = true;
-    portGroup.add(wh);
-    raycastTargets.push(wh);
+    pushTransformedGeo(
+      portStaticGeos,
+      new THREE.BoxGeometry(44, 12.5, 80),
+      -926,
+      3.0 + 6.25,
+      wz,
+      0,
+      0,
+      0,
+      1,
+      1,
+      1,
+      0x7a8a9c
+    );
   }
 
-  // Six Tall Red/White Gantry Container Cranes merged into 2 draw calls (42 draw calls -> 2!)
-  const craneRedMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0xc2382c, roughness: 0.76, metalness: 0.15 })
-  );
-  const skyRedBeaconMat = trackMat(
-    new THREE.MeshStandardMaterial({
-      color: 0xff2a2a,
-      emissive: 0xff1e1e,
-      emissiveIntensity: 1.4,
-      roughness: 0.2,
-    })
-  );
-  const craneRedGeos: THREE.BufferGeometry[] = [];
-  const craneApexGeos: THREE.BufferGeometry[] = [];
+  // Six Tall Red/White Gantry Container Cranes
   for (const dz of [-195, -125, -55, 25, 95, 165]) {
     const cx = PORT_QUAY_POS.x - 14;
     const cy = PORT_QUAY_POS.dockY;
@@ -926,38 +926,64 @@ export function buildCoastalIslandWorld(
     for (const lx of [-6.8, 6.8]) {
       for (const lz of [-5.4, 5.4]) {
         pushTransformedGeo(
-          craneRedGeos,
+          portStaticGeos,
           new THREE.BoxGeometry(1.6, 28, 1.6),
           cx + lx,
           cy + 14,
-          cz + lz
+          cz + lz,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          0xc2382c
         );
       }
     }
-    pushTransformedGeo(craneRedGeos, new THREE.BoxGeometry(48, 3.0, 12.2), cx - 9, cy + 26.5, cz);
-    pushTransformedGeo(craneApexGeos, new THREE.BoxGeometry(11.0, 4.6, 8.6), cx + 1, cy + 29.8, cz);
+    pushTransformedGeo(
+      portStaticGeos,
+      new THREE.BoxGeometry(48, 3.0, 12.2),
+      cx - 9,
+      cy + 26.5,
+      cz,
+      0,
+      0,
+      0,
+      1,
+      1,
+      1,
+      0xc2382c
+    );
+    pushTransformedGeo(
+      portStaticGeos,
+      new THREE.BoxGeometry(11.0, 4.6, 8.6),
+      cx + 1,
+      cy + 29.8,
+      cz,
+      0,
+      0,
+      0,
+      1,
+      1,
+      1,
+      0x9aa8b8
+    );
     skyRedBeaconCoords.push({ x: cx + 1, y: cy + 32.8, z: cz, r: 0.65 });
   }
-  const mergedCraneRedGeo = mergeNormalizedGeos(craneRedGeos);
-  if (mergedCraneRedGeo) {
-    const cranesRedMesh = new THREE.Mesh(mergedCraneRedGeo, craneRedMat);
-    cranesRedMesh.castShadow = true;
-    cranesRedMesh.receiveShadow = true;
-    portGroup.add(cranesRedMesh);
-  }
-  const mergedCraneApexGeo = mergeNormalizedGeos(craneApexGeos);
-  if (mergedCraneApexGeo) {
-    const cranesApexMesh = new THREE.Mesh(mergedCraneApexGeo, concreteMat);
-    cranesApexMesh.castShadow = false;
-    cranesApexMesh.receiveShadow = true;
-    portGroup.add(cranesApexMesh);
+
+  const mergedPortStaticGeo = mergeNormalizedGeos(portStaticGeos, true);
+  if (mergedPortStaticGeo) {
+    const portUnifiedMesh = new THREE.Mesh(mergedPortStaticGeo, vertexColorLambertMat);
+    portUnifiedMesh.castShadow = false;
+    portUnifiedMesh.receiveShadow = true;
+    portGroup.add(portUnifiedMesh);
+    raycastTargets.push(portUnifiedMesh);
   }
 
-  // Instanced Colorful Stacked Shipping Containers on the 2x Port Apron (1 draw call, no shadow overhead!)
+  // Instanced Colorful Stacked Shipping Containers on the 2x Port Apron (1 lightweight Lambert draw call)
   const containerGeo = trackGeo(new THREE.BoxGeometry(4.2, 3.2, 11.5));
-  const containerInstMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.86, metalness: 0.05 })
-  );
+  const containerInstMat = trackMat(new THREE.MeshLambertMaterial({ color: 0xffffff }));
   const containerPalette = [0x2b6cb0, 0xc53030, 0xd69e2e, 0x2f855a, 0xdd6b20, 0x4a5568, 0x0e7490];
   const containerPlacements: Array<{ x: number; y: number; z: number; color: number }> = [];
   let cIdx = 0;
@@ -999,66 +1025,28 @@ export function buildCoastalIslandWorld(
   portContainerInst.computeBoundingSphere();
   portGroup.add(portContainerInst);
 
-  // Two Moored 82m Container Cargo Ships berthed alongside the 2x West Port Quay
-  const shipHullMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0x7f1d1d, roughness: 0.72, metalness: 0.12 })
-  );
-  const shipUpperHullMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.78, metalness: 0.15 })
-  );
-  const shipBridgeMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0xdbe4ee, roughness: 0.85, metalness: 0.0 })
-  );
-  const shipLowerHullGeo = trackGeo(new THREE.BoxGeometry(17.5, 4.8, 76));
-  const shipFreeboardGeo = trackGeo(new THREE.BoxGeometry(18.0, 3.0, 77));
-  const shipBowGeo = trackGeo(new THREE.CylinderGeometry(0.4, 12.2, 7.8, 4));
-  shipBowGeo.rotateY(Math.PI / 4);
-  const shipBridgeGeo = trackGeo(new THREE.BoxGeometry(15.2, 12.2, 12.0));
-  const shipBridgeWinGeo = trackGeo(new THREE.BoxGeometry(15.5, 2.6, 8.8));
-  const shipFunnelGeo = trackGeo(new THREE.BoxGeometry(4.4, 5.6, 4.8));
-  const shipBeaconGeo = trackGeo(new THREE.SphereGeometry(0.58, 8, 8));
+  // Two Moored 82m Container Cargo Ships: 1 merged hull/bridge/funnel mesh + 1 instanced container deck per ship (16 calls -> 4!)
+  const shipMergedGeoParts: THREE.BufferGeometry[] = [];
+  pushTransformedGeo(shipMergedGeoParts, new THREE.BoxGeometry(17.5, 4.8, 76), 0, 1.4, 0, 0, 0, 0, 1, 1, 1, 0x7f1d1d);
+  pushTransformedGeo(shipMergedGeoParts, new THREE.BoxGeometry(18.0, 3.0, 77), 0, 5.2, 0, 0, 0, 0, 1, 1, 1, 0x1e293b);
+  pushTransformedGeo(shipMergedGeoParts, new THREE.CylinderGeometry(0.4, 12.2, 7.8, 4), 0, 3.1, -41.5, 0, Math.PI / 4, 0, 0.95, 1, 1.45, 0x1e293b);
+  pushTransformedGeo(shipMergedGeoParts, new THREE.BoxGeometry(15.2, 12.2, 12.0), 0, 12.4, 27.5, 0, 0, 0, 1, 1, 1, 0xdbe4ee);
+  pushTransformedGeo(shipMergedGeoParts, new THREE.BoxGeometry(15.5, 2.6, 8.8), 0, 16.2, 27.5, 0, 0, 0, 1, 1, 1, 0x1e293b);
+  pushTransformedGeo(shipMergedGeoParts, new THREE.BoxGeometry(4.4, 5.6, 4.8), 0, 20.8, 30.0, 0, 0, 0, 1, 1, 1, 0xc2382c);
+  const sharedShipHullGeo = mergeNormalizedGeos(shipMergedGeoParts, true);
 
   for (const [shipIdx, shipDz] of [-110, 95].entries()) {
     const cargoShipGroup = new THREE.Group();
     cargoShipGroup.position.set(PORT_QUAY_POS.x - 59, OCEAN_LEVEL, PORT_QUAY_POS.z + shipDz);
     if (shipIdx === 1) cargoShipGroup.rotation.y = Math.PI;
 
-    const shipLowerHull = new THREE.Mesh(shipLowerHullGeo, shipHullMat);
-    shipLowerHull.position.set(0, 1.4, 0);
-    shipLowerHull.castShadow = true;
-    shipLowerHull.receiveShadow = true;
-    cargoShipGroup.add(shipLowerHull);
-    raycastTargets.push(shipLowerHull);
-
-    const shipFreeboard = new THREE.Mesh(shipFreeboardGeo, shipUpperHullMat);
-    shipFreeboard.position.set(0, 5.2, 0);
-    shipFreeboard.castShadow = true;
-    shipFreeboard.receiveShadow = true;
-    cargoShipGroup.add(shipFreeboard);
-
-    const shipBow = new THREE.Mesh(shipBowGeo, shipUpperHullMat);
-    shipBow.position.set(0, 3.1, -41.5);
-    shipBow.scale.set(0.95, 1, 1.45);
-    cargoShipGroup.add(shipBow);
-
-    const shipBridge = new THREE.Mesh(shipBridgeGeo, shipBridgeMat);
-    shipBridge.position.set(0, 12.4, 27.5);
-    shipBridge.castShadow = true;
-    shipBridge.receiveShadow = true;
-    cargoShipGroup.add(shipBridge);
-    raycastTargets.push(shipBridge);
-
-    const shipBridgeWin = new THREE.Mesh(shipBridgeWinGeo, chaletWindowMat);
-    shipBridgeWin.position.set(0, 16.2, 27.5);
-    cargoShipGroup.add(shipBridgeWin);
-
-    const shipFunnel = new THREE.Mesh(shipFunnelGeo, craneRedMat);
-    shipFunnel.position.set(0, 20.8, 30.0);
-    cargoShipGroup.add(shipFunnel);
-
-    const shipMastBeacon = new THREE.Mesh(shipBeaconGeo, skyRedBeaconMat);
-    shipMastBeacon.position.set(0, 24.2, 30.0);
-    cargoShipGroup.add(shipMastBeacon);
+    if (sharedShipHullGeo) {
+      const shipHullMesh = new THREE.Mesh(sharedShipHullGeo, vertexColorLambertMat);
+      shipHullMesh.castShadow = false;
+      shipHullMesh.receiveShadow = true;
+      cargoShipGroup.add(shipHullMesh);
+      raycastTargets.push(shipHullMesh);
+    }
 
     const shipContInst = new THREE.InstancedMesh(containerGeo, containerInstMat, 24);
     shipContInst.castShadow = false;
@@ -1267,13 +1255,11 @@ export function buildCoastalIslandWorld(
   windsock.add(sockCone);
   airbaseGroup.add(windsock);
 
-  // === 5. EXPANDED URBAN ROAD GRID (6x5 Avenues) & CENTRAL PARK ===
+  // === 5. EXPANDED URBAN ROAD GRID (6x5 Avenues) & CENTRAL PARK (LIGHTWEIGHT LAMBERT) ===
   const urbanY = 3.04;
   const roadMat = trackMat(
-    new THREE.MeshStandardMaterial({
+    new THREE.MeshLambertMaterial({
       color: 0x2b3646,
-      roughness: 0.95,
-      metalness: 0.0,
       polygonOffset: true,
       polygonOffsetFactor: -1,
       polygonOffsetUnits: -1,
@@ -1403,6 +1389,138 @@ export function buildCoastalIslandWorld(
     allRoadsMesh.castShadow = false;
     root.add(allRoadsMesh);
   }
+
+  // === 5A. GRAND URBAN PARK + ARENA CENTRAL STADIUM + CITY SOLIDS (MERGED INTO 1 SINGLE LAMBERT DRAW CALL!) ===
+  const cityUnifiedSolidsGeos: THREE.BufferGeometry[] = [];
+  const cityEmissiveGeos: THREE.BufferGeometry[] = [];
+  const parkW = PARK_RECT.maxX - PARK_RECT.minX;
+  const parkD = PARK_RECT.maxZ - PARK_RECT.minZ;
+  const parkCx = (PARK_RECT.minX + PARK_RECT.maxX) / 2;
+  const parkCz = (PARK_RECT.minZ + PARK_RECT.maxZ) / 2;
+
+  pushTransformedGeo(cityUnifiedSolidsGeos, new THREE.BoxGeometry(parkW, 0.25, parkD), parkCx, 3.05, parkCz, 0, 0, 0, 1, 1, 1, 0x3b8238);
+  pushTransformedGeo(cityUnifiedSolidsGeos, new THREE.BoxGeometry(parkW - 8, 0.3, 4.4), parkCx, 3.08, parkCz, 0, 0, 0, 1, 1, 1, 0xbfaf90);
+  pushTransformedGeo(cityUnifiedSolidsGeos, new THREE.BoxGeometry(4.4, 0.3, parkD - 8), -4, 3.08, parkCz, 0, 0, 0, 1, 1, 1, 0xbfaf90);
+
+  // Ornamental Park Lake Rim, Water, Wooden Footbridge & Fountain
+  pushTransformedGeo(
+    cityUnifiedSolidsGeos,
+    new THREE.CylinderGeometry(1, 1.04, 0.45, 24),
+    PARK_POND_POS.x,
+    3.22,
+    PARK_POND_POS.z,
+    0,
+    0,
+    0,
+    PARK_POND_POS.rx,
+    1,
+    PARK_POND_POS.rz,
+    0x9aa8b8
+  );
+
+  const pondWater = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.95, 0.95, 0.48, 24)), lakeMat);
+  pondWater.position.set(PARK_POND_POS.x, 3.28, PARK_POND_POS.z);
+  pondWater.scale.set(PARK_POND_POS.rx, 1, PARK_POND_POS.rz);
+  root.add(pondWater);
+
+  pushTransformedGeo(cityUnifiedSolidsGeos, new THREE.BoxGeometry(PARK_POND_POS.rx * 2.08, 0.45, 3.6), PARK_POND_POS.x, 4.1, PARK_POND_POS.z, 0, 0, 0, 1, 1, 1, 0x99653a);
+  for (const rz of [-1.65, 1.65]) {
+    pushTransformedGeo(cityUnifiedSolidsGeos, new THREE.BoxGeometry(PARK_POND_POS.rx * 2.04, 0.95, 0.22), PARK_POND_POS.x, 4.7, PARK_POND_POS.z + rz, 0, 0, 0, 1, 1, 1, 0x723e1d);
+  }
+  pushTransformedGeo(cityUnifiedSolidsGeos, new THREE.ConeGeometry(1.1, 4.2, 8), PARK_POND_POS.x, 5.4, PARK_POND_POS.z - 12, 0, 0, 0, 1, 1, 1, 0xcbe9f8);
+
+  // Urban Stadium ("Arena Central") merged directly into cityUnifiedSolidsGeos!
+  const stadScaleX = STADIUM_POS.rx / 36;
+  const stadScaleZ = STADIUM_POS.rz / 36;
+  const stX = STADIUM_POS.x;
+  const stY = 3.06;
+  const stZ = STADIUM_POS.z;
+
+  const stadiumFloodMat = trackMat(
+    new THREE.MeshLambertMaterial({
+      color: 0xe2e8f0,
+      emissive: 0xfff8dc,
+      emissiveIntensity: 0,
+    })
+  );
+
+  // Outer Stadium Bowl Wall
+  pushTransformedGeo(
+    cityUnifiedSolidsGeos,
+    new THREE.CylinderGeometry(35.5, 34.0, 14.5, 28, 1, true),
+    stX,
+    stY + 7.25,
+    stZ,
+    0,
+    0,
+    0,
+    stadScaleX,
+    1,
+    stadScaleZ,
+    0xb8c3cf
+  );
+
+  // Inner Stepped Seating Bowl (inward-facing winding so no DoubleSide material split is needed)
+  const seatsRaw = new THREE.CylinderGeometry(34.2, 23.0, 12.2, 28, 1, true).toNonIndexed();
+  const sPos = seatsRaw.attributes.position as THREE.BufferAttribute;
+  for (let i = 0; i < sPos.count; i += 3) {
+    const x1 = sPos.getX(i + 1);
+    const y1 = sPos.getY(i + 1);
+    const z1 = sPos.getZ(i + 1);
+    sPos.setXYZ(i + 1, sPos.getX(i + 2), sPos.getY(i + 2), sPos.getZ(i + 2));
+    sPos.setXYZ(i + 2, x1, y1, z1);
+  }
+  seatsRaw.computeVertexNormals();
+  pushTransformedGeo(
+    cityUnifiedSolidsGeos,
+    seatsRaw,
+    stX,
+    stY + 6.2,
+    stZ,
+    0,
+    0,
+    0,
+    stadScaleX,
+    1,
+    stadScaleZ,
+    0x334e68
+  );
+
+  // Overhanging Canopy Roof (top & underside merged into unified single-sided solid mesh)
+  pushTransformedGeo(
+    cityUnifiedSolidsGeos,
+    new THREE.RingGeometry(24.5, 36.2, 28),
+    stX,
+    stY + 14.85,
+    stZ,
+    -Math.PI / 2,
+    0,
+    0,
+    stadScaleX,
+    stadScaleZ,
+    1,
+    0xd9e2ec
+  );
+  pushTransformedGeo(
+    cityUnifiedSolidsGeos,
+    new THREE.RingGeometry(24.5, 36.2, 28),
+    stX,
+    stY + 14.75,
+    stZ,
+    Math.PI / 2,
+    0,
+    0,
+    stadScaleX,
+    stadScaleZ,
+    1,
+    0xbecad8
+  );
+
+  // Football / Soccer Pitch + Markings (merged into stripes batch!)
+  pushTransformedGeo(cityUnifiedSolidsGeos, new THREE.BoxGeometry(58, 0.35, 82), stX, stY + 0.2, stZ, 0, 0, 0, 1, 1, 1, 0x2f8f3b);
+  pushTransformedGeo(mergedStripeGeos, new THREE.BoxGeometry(52, 0.08, 0.65), stX, stY + 0.42, stZ);
+  pushTransformedGeo(mergedStripeGeos, new THREE.RingGeometry(6.4, 7.1, 24), stX, stY + 0.44, stZ, -Math.PI / 2, 0, 0);
+
   const allStripesGeo = mergeNormalizedGeos(mergedStripeGeos);
   if (allStripesGeo) {
     const allStripesMesh = new THREE.Mesh(allStripesGeo, stripeMat);
@@ -1410,164 +1528,39 @@ export function buildCoastalIslandWorld(
     root.add(allStripesMesh);
   }
 
-  // === 5A. GRAND URBAN PARK: ORNAMENTAL LAKE + FOOTBRIDGE + ARENA CENTRAL STADIUM ===
-  const parkW = PARK_RECT.maxX - PARK_RECT.minX;
-  const parkD = PARK_RECT.maxZ - PARK_RECT.minZ;
-  const parkCx = (PARK_RECT.minX + PARK_RECT.maxX) / 2;
-  const parkCz = (PARK_RECT.minZ + PARK_RECT.maxZ) / 2;
-
-  const parkLawn = new THREE.Mesh(
-    trackGeo(new THREE.BoxGeometry(parkW, 0.25, parkD)),
-    trackMat(new THREE.MeshStandardMaterial({ color: 0x3b8238, roughness: 0.94, metalness: 0.0 }))
-  );
-  parkLawn.position.set(parkCx, 3.05, parkCz);
-  parkLawn.receiveShadow = true;
-  root.add(parkLawn);
-
-  const pathMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0xbfaf90, roughness: 0.94, metalness: 0.0 })
-  );
-  const pathH = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(parkW - 8, 0.3, 4.4)), pathMat);
-  pathH.position.set(parkCx, 3.08, parkCz);
-  pathH.receiveShadow = true;
-  root.add(pathH);
-
-  const pathDiv = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(4.4, 0.3, parkD - 8)), pathMat);
-  pathDiv.position.set(-4, 3.08, parkCz);
-  pathDiv.receiveShadow = true;
-  root.add(pathDiv);
-
-  // Ornamental Park Lake (West Half of Park) + Wooden Footbridge + Center Fountain
-  const pondRimGeo = trackGeo(new THREE.CylinderGeometry(1, 1.04, 0.45, 24));
-  const pondRim = new THREE.Mesh(pondRimGeo, concreteMat);
-  pondRim.position.set(PARK_POND_POS.x, 3.22, PARK_POND_POS.z);
-  pondRim.scale.set(PARK_POND_POS.rx, 1, PARK_POND_POS.rz);
-  pondRim.receiveShadow = true;
-  root.add(pondRim);
-
-  const pondWater = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.95, 0.95, 0.48, 24)), lakeMat);
-  pondWater.position.set(PARK_POND_POS.x, 3.28, PARK_POND_POS.z);
-  pondWater.scale.set(PARK_POND_POS.rx, 1, PARK_POND_POS.rz);
-  root.add(pondWater);
-
-  const footbridgeDeck = new THREE.Mesh(
-    trackGeo(new THREE.BoxGeometry(PARK_POND_POS.rx * 2.08, 0.45, 3.6)),
-    warmTimberMat
-  );
-  footbridgeDeck.position.set(PARK_POND_POS.x, 4.1, PARK_POND_POS.z);
-  footbridgeDeck.castShadow = true;
-  root.add(footbridgeDeck);
-
-  for (const rz of [-1.65, 1.65]) {
-    const rail = new THREE.Mesh(
-      trackGeo(new THREE.BoxGeometry(PARK_POND_POS.rx * 2.04, 0.95, 0.22)),
-      timberMat
-    );
-    rail.position.set(PARK_POND_POS.x, 4.7, PARK_POND_POS.z + rz);
-    root.add(rail);
-  }
-
-  const fountainSpire = new THREE.Mesh(trackGeo(new THREE.ConeGeometry(1.1, 4.2, 8)), foamMat);
-  fountainSpire.position.set(PARK_POND_POS.x, 5.4, PARK_POND_POS.z - 12);
-  root.add(fountainSpire);
-
-  // Urban Stadium ("Arena Central") on the East Half of the Grand Park
-  const stadiumGroup = new THREE.Group();
-  stadiumGroup.position.set(STADIUM_POS.x, 3.06, STADIUM_POS.z);
-  const stadScaleX = STADIUM_POS.rx / 36;
-  const stadScaleZ = STADIUM_POS.rz / 36;
-
-  const stadiumOuterMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0xb8c3cf, roughness: 0.9, metalness: 0.0 })
-  );
-  const stadiumSeatsMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0x334e68, roughness: 0.92, metalness: 0.0 })
-  );
-  const stadiumRoofMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0xd9e2ec, roughness: 0.86, metalness: 0.0 })
-  );
-  const pitchMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0x2f8f3b, roughness: 0.95, metalness: 0.0 })
-  );
-  const pitchLineMat = trackMat(new THREE.MeshBasicMaterial({ color: 0xf1f5f9 }));
-  const stadiumFloodMat = trackMat(
-    new THREE.MeshStandardMaterial({
-      color: 0xe2e8f0,
-      emissive: 0xfff8dc,
-      emissiveIntensity: 0,
-      roughness: 0.2,
-    })
-  );
-
-  // Outer Stadium Bowl Wall (open-ended cylinder scaled into oval)
-  const bowlOuter = new THREE.Mesh(
-    trackGeo(new THREE.CylinderGeometry(35.5, 34.0, 14.5, 28, 1, true)),
-    stadiumOuterMat
-  );
-  bowlOuter.position.y = 7.25;
-  bowlOuter.scale.set(stadScaleX, 1, stadScaleZ);
-  bowlOuter.castShadow = true;
-  bowlOuter.receiveShadow = true;
-  stadiumGroup.add(bowlOuter);
-  raycastTargets.push(bowlOuter);
-
-  // Stepped Seating Ring & Overhanging Canopy Roof
-  const seatsTier = new THREE.Mesh(
-    trackGeo(new THREE.CylinderGeometry(34.2, 23.0, 12.2, 28, 1, true)),
-    stadiumSeatsMat
-  );
-  seatsTier.material.side = THREE.DoubleSide;
-  seatsTier.position.y = 6.2;
-  seatsTier.scale.set(stadScaleX, 1, stadScaleZ);
-  stadiumGroup.add(seatsTier);
-
-  const roofRimGeo = trackGeo(new THREE.RingGeometry(24.5, 36.2, 28));
-  roofRimGeo.rotateX(-Math.PI / 2);
-  const roofRim = new THREE.Mesh(roofRimGeo, stadiumRoofMat);
-  roofRim.material.side = THREE.DoubleSide;
-  roofRim.position.y = 14.8;
-  roofRim.scale.set(stadScaleX, 1, stadScaleZ);
-  roofRim.castShadow = true;
-  roofRim.receiveShadow = true;
-  stadiumGroup.add(roofRim);
-
-  // Football / Soccer Pitch + White Markings (scaled for expanded Arena Central)
-  const pitchMesh = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(58, 0.35, 82)), pitchMat);
-  pitchMesh.position.y = 0.2;
-  pitchMesh.receiveShadow = true;
-  stadiumGroup.add(pitchMesh);
-
-  const midLine = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(52, 0.08, 0.65)), pitchLineMat);
-  midLine.position.y = 0.42;
-  stadiumGroup.add(midLine);
-
-  const centerCircleGeo = trackGeo(new THREE.RingGeometry(6.4, 7.1, 24));
-  centerCircleGeo.rotateX(-Math.PI / 2);
-  const centerCircle = new THREE.Mesh(centerCircleGeo, pitchLineMat);
-  centerCircle.position.y = 0.44;
-  stadiumGroup.add(centerCircle);
-
-  // 4 Tall Corner Floodlight Towers
+  // 4 Tall Corner Floodlight Towers (masts merged into city solids; glowing flood heads merged into cityEmissiveGeos)
   for (const [fx, fz] of [
     [-40, -50],
     [40, -50],
     [-40, 50],
     [40, 50],
   ]) {
-    const fMast = new THREE.Mesh(
-      trackGeo(new THREE.CylinderGeometry(0.46, 0.8, 30, 6)),
-      darkConcreteMat
+    pushTransformedGeo(
+      cityUnifiedSolidsGeos,
+      new THREE.CylinderGeometry(0.46, 0.8, 30, 6),
+      stX + fx,
+      stY + 15,
+      stZ + fz,
+      0,
+      0,
+      0,
+      1,
+      1,
+      1,
+      0x4f5d6e
     );
-    fMast.position.set(fx, 15, fz);
-    fMast.castShadow = true;
-    stadiumGroup.add(fMast);
-
-    const fHead = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(6.6, 3.2, 1.3)), stadiumFloodMat);
-    fHead.position.set(fx, 30.4, fz);
-    fHead.lookAt(STADIUM_POS.x, 3.5, STADIUM_POS.z);
-    stadiumGroup.add(fHead);
+    const yawToPitch = Math.atan2(-fx, -fz);
+    pushTransformedGeo(
+      cityEmissiveGeos,
+      new THREE.BoxGeometry(6.6, 3.2, 1.3),
+      stX + fx,
+      stY + 30.4,
+      stZ + fz,
+      0.32,
+      yawToPitch,
+      0
+    );
   }
-  root.add(stadiumGroup);
 
   // === 5B. INSTANCED WARM AVENUE STREETLAMPS (auto-lit at Dusk & Night) ===
   const streetLampPositions: Array<{ x: number; z: number; rotY: number }> = [];
@@ -1620,15 +1613,12 @@ export function buildCoastalIslandWorld(
   }
 
   const lampCount = streetLampPositions.length;
-  const lampPoleMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.65, metalness: 0.55 })
-  );
+  const lampPoleMat = trackMat(new THREE.MeshLambertMaterial({ color: 0x334155 }));
   const lampBulbMat = trackMat(
-    new THREE.MeshStandardMaterial({
+    new THREE.MeshLambertMaterial({
       color: 0xfff3d1,
       emissive: 0xffb84d,
       emissiveIntensity: 0.0,
-      roughness: 0.2,
     })
   );
   const lampGlowPoolMat = trackMat(
@@ -1704,97 +1694,68 @@ export function buildCoastalIslandWorld(
     }
   }
 
-  // === 6. EXPANDED CITY BUILDINGS — MERGED & INSTANCED BY MATERIAL (~2,000 draw calls -> ~24 draw calls!) ===
+  // === 6. EXPANDED CITY BUILDINGS — ULTRA-MERGED INTO 4 SHARED FACADE TEXTURES + 1 SOLID BATCH (<15 CALLS TOTAL!) ===
   const standardPadTex = trackTex(createHelipadTexture(maxAnisotropy, 'standard'));
   const hospitalPadTex = trackTex(createHelipadTexture(maxAnisotropy, 'hospital'));
 
   const sharedStandardPadMat = trackMat(
-    new THREE.MeshStandardMaterial({
+    new THREE.MeshLambertMaterial({
       map: standardPadTex,
-      roughness: 0.88,
-      metalness: 0.0,
       polygonOffset: true,
       polygonOffsetFactor: -1,
       polygonOffsetUnits: -1,
     })
   );
   const sharedHospitalPadMat = trackMat(
-    new THREE.MeshStandardMaterial({
+    new THREE.MeshLambertMaterial({
       map: hospitalPadTex,
-      roughness: 0.88,
-      metalness: 0.0,
       polygonOffset: true,
       polygonOffsetFactor: -1,
       polygonOffsetUnits: -1,
     })
   );
-  const roofConcreteMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0x546272, roughness: 0.92, metalness: 0.0 })
-  );
-  const rooftopWoodTankMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0x9a6b43, roughness: 0.88, metalness: 0.0 })
-  );
-  const rooftopMetalMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0x8f9eb0, roughness: 0.62, metalness: 0.3 })
-  );
-  const rooftopFanMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.78, metalness: 0.25 })
-  );
-  const podiumInstMat = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9, metalness: 0.0 })
-  );
-  const crownGlassVertexMat = trackMat(
-    new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      vertexColors: true,
-      roughness: 0.32,
-      metalness: 0.38,
-    })
-  );
 
-  const facadeMatCache = new Map<string, THREE.MeshStandardMaterial>();
-  const facadeGeoBuckets = new Map<THREE.MeshStandardMaterial, THREE.BufferGeometry[]>();
-  const getFacadeMat = (
-    color: number,
-    accent: number,
-    style: 'office' | 'residential' | 'hospital' | 'civic' | 'tower',
-    variantSeed: number
-  ) => {
-    const key = `${color}_${accent}_${style}_${variantSeed % 3}`;
-    let m = facadeMatCache.get(key);
-    if (!m) {
-      const baseHex = `#${color.toString(16).padStart(6, '0')}`;
-      const accentHex = `#${accent.toString(16).padStart(6, '0')}`;
-      const winHex = style === 'tower' ? '#38bdf8' : style === 'hospital' ? '#93c5fd' : '#475569';
-      const pair = createFacadeTextures(
-        maxAnisotropy,
-        baseHex,
-        winHex,
-        accentHex,
-        style,
-        variantSeed
-      );
-      trackTex(pair.map);
-      trackTex(pair.emissiveMap);
-
-      m = trackMat(
-        new THREE.MeshStandardMaterial({
-          map: pair.map,
-          emissiveMap: pair.emissiveMap,
-          emissive: new THREE.Color(0xffffff),
-          emissiveIntensity: 0,
-          roughness: style === 'tower' ? 0.86 : 0.92,
-          metalness: 0.0,
-        })
-      );
-      facadeMatCache.set(key, m);
-      facadeGeoBuckets.set(m, []);
-      nightWindowMats.push(m);
-    }
-    return m;
+  // Create EXACTLY 4 shared opaque MeshLambertMaterial facade sets OUTSIDE the building loop (0 CanvasTexture in loops!)
+  // Per-building vertex colors preserve every building's distinct architecture while collapsing ~80 draw calls -> 4!
+  type FacadeBucketKey = 'office' | 'residential' | 'hospital' | 'tower';
+  const makeSharedFacadeMat = (
+    baseHex: string,
+    winHex: string,
+    accentHex: string,
+    style: FacadeBucketKey,
+    seed: number
+  ): THREE.MeshLambertMaterial => {
+    const pair = createFacadeTextures(maxAnisotropy, baseHex, winHex, accentHex, style, seed);
+    trackTex(pair.map);
+    trackTex(pair.emissiveMap);
+    const mat = trackMat(
+      new THREE.MeshLambertMaterial({
+        map: pair.map,
+        emissiveMap: pair.emissiveMap,
+        emissive: new THREE.Color(0xffffff),
+        emissiveIntensity: 0,
+        vertexColors: true,
+        transparent: false,
+      })
+    );
+    nightWindowMats.push(mat);
+    return mat;
   };
 
-  // Push 4 vertical facade quads matching BoxGeometry side UV orientation 1-to-1 (skips hidden bottom face!)
+  const sharedFacadeMats: Record<FacadeBucketKey, THREE.MeshLambertMaterial> = {
+    office: makeSharedFacadeMat('#e6ebf2', '#47627a', '#cbd5e1', 'office', 1),
+    residential: makeSharedFacadeMat('#eceae4', '#475569', '#d2cdc2', 'residential', 2),
+    hospital: makeSharedFacadeMat('#f1f5f9', '#7ab6e8', '#cbd5e1', 'hospital', 3),
+    tower: makeSharedFacadeMat('#dde8f4', '#38bdf8', '#9eb6cf', 'tower', 4),
+  };
+  const facadeBuckets: Record<FacadeBucketKey, THREE.BufferGeometry[]> = {
+    office: [],
+    residential: [],
+    hospital: [],
+    tower: [],
+  };
+
+  // Push 4 vertical facade quads with per-building vertex tint (opaque, zero bottom overdraw)
   const pushTowerWallQuads = (
     bucket: THREE.BufferGeometry[],
     cx: number,
@@ -1802,64 +1763,67 @@ export function buildCoastalIslandWorld(
     cz: number,
     w: number,
     h: number,
-    d: number
+    d: number,
+    tintHex: number
   ) => {
-    pushTransformedGeo(bucket, new THREE.PlaneGeometry(w, h), cx, cy, cz + d * 0.5, 0, 0, 0);
-    pushTransformedGeo(bucket, new THREE.PlaneGeometry(w, h), cx, cy, cz - d * 0.5, 0, Math.PI, 0);
-    pushTransformedGeo(bucket, new THREE.PlaneGeometry(d, h), cx + w * 0.5, cy, cz, 0, Math.PI * 0.5, 0);
-    pushTransformedGeo(bucket, new THREE.PlaneGeometry(d, h), cx - w * 0.5, cy, cz, 0, -Math.PI * 0.5, 0);
+    pushTransformedGeo(bucket, new THREE.PlaneGeometry(w, h), cx, cy, cz + d * 0.5, 0, 0, 0, 1, 1, 1, tintHex);
+    pushTransformedGeo(bucket, new THREE.PlaneGeometry(w, h), cx, cy, cz - d * 0.5, 0, Math.PI, 0, 1, 1, 1, tintHex);
+    pushTransformedGeo(bucket, new THREE.PlaneGeometry(d, h), cx + w * 0.5, cy, cz, 0, Math.PI * 0.5, 0, 1, 1, 1, tintHex);
+    pushTransformedGeo(bucket, new THREE.PlaneGeometry(d, h), cx - w * 0.5, cy, cz, 0, -Math.PI * 0.5, 0, 1, 1, 1, tintHex);
   };
 
-  const cityRoofCapGeos: THREE.BufferGeometry[] = [];
   const cityPadStdGeos: THREE.BufferGeometry[] = [];
   const cityPadHospGeos: THREE.BufferGeometry[] = [];
-  const cityCrownGlassGeos: THREE.BufferGeometry[] = [];
-  const cityCrownCollarGeos: THREE.BufferGeometry[] = [];
-  // Major skyscraper spires remain visible as part of the main city skyline silhouette
-  const citySkyscraperSpireGeos: THREE.BufferGeometry[] = [];
 
-  // Small rooftop details (parapets, HVAC, water tanks, small antennas, fans) partitioned into 2x2 quadrants
-  // so they automatically hide beyond ~390m while preserving the iconic skyscraper silhouettes!
-  const quadParapetGeos: THREE.BufferGeometry[][] = [[], [], [], []];
-  const quadSmallMetalGeos: THREE.BufferGeometry[][] = [[], [], [], []];
-  const quadWoodTankGeos: THREE.BufferGeometry[][] = [[], [], [], []];
-  const quadDarkDetailGeos: THREE.BufferGeometry[][] = [[], [], [], []];
-  const quadFanGeos: THREE.BufferGeometry[][] = [[], [], [], []];
-
-  // 1 InstancedMesh for ALL building podiums (1 draw call + 1 material for the entire city!)
-  const unitPodiumGeo = trackGeo(new THREE.BoxGeometry(1, 1, 1));
-  const podiumInst = new THREE.InstancedMesh(unitPodiumGeo, podiumInstMat, BUILDING_SPECS.length);
-  podiumInst.castShadow = true;
-  podiumInst.receiveShadow = true;
-  const bDummy = new THREE.Object3D();
-  const bCol = new THREE.Color();
+  // Small rooftop micro-details (parapets, HVAC, water tanks, small antennas, fans) merged into 1 Lambert mesh per quadrant!
+  const quadMicroDetailGeos: THREE.BufferGeometry[][] = [[], [], [], []];
 
   BUILDING_SPECS.forEach((b, bIdx) => {
     const groundY = getTerrainHeight(b.x, b.z);
     const qIdx = getCityQuadIdx(b.x, b.z);
 
-    // Podium instance
-    bDummy.position.set(b.x, groundY + 1.6, b.z);
-    bDummy.rotation.set(0, 0, 0);
-    bDummy.scale.set(b.width + 1.2, 3.2, b.depth + 1.2);
-    bDummy.updateMatrix();
-    podiumInst.setMatrixAt(bIdx, bDummy.matrix);
-    bCol.setHex(b.accentColor);
-    podiumInst.setColorAt(bIdx, bCol);
-
-    // Tower side facades (merged per shared facade material) + roof cap
-    const facadeMat = getFacadeMat(b.color, b.accentColor, b.style, bIdx + 1);
-    const facadeBucket = facadeGeoBuckets.get(facadeMat)!;
-    pushTowerWallQuads(facadeBucket, b.x, groundY + b.height * 0.5, b.z, b.width, b.height, b.depth);
+    // Building ground podium merged into cityUnifiedSolidsGeos (zero extra draw calls, castShadow = false)
     pushTransformedGeo(
-      cityRoofCapGeos,
+      cityUnifiedSolidsGeos,
+      new THREE.BoxGeometry(b.width + 1.2, 3.2, b.depth + 1.2),
+      b.x,
+      groundY + 1.6,
+      b.z,
+      0,
+      0,
+      0,
+      1,
+      1,
+      1,
+      b.accentColor
+    );
+
+    // Route ONLY giant downtown skyscrapers (height >= 72) to the 'tower' batch so ONLY they cast shadows in High/Ultra
+    const bucketKey: FacadeBucketKey =
+      b.style === 'hospital'
+        ? 'hospital'
+        : b.style === 'tower' && b.height >= 72
+          ? 'tower'
+          : b.style === 'residential'
+            ? 'residential'
+            : 'office';
+    const wallTint = b.style === 'hospital' ? 0xffffff : b.color;
+    const facadeBucket = facadeBuckets[bucketKey];
+
+    pushTowerWallQuads(facadeBucket, b.x, groundY + b.height * 0.5, b.z, b.width, b.height, b.depth, wallTint);
+    pushTransformedGeo(
+      cityUnifiedSolidsGeos,
       new THREE.PlaneGeometry(b.width, b.depth),
       b.x,
       groundY + b.height,
       b.z,
       -Math.PI * 0.5,
       0,
-      0
+      0,
+      1,
+      1,
+      1,
+      0x546272
     );
 
     if (b.hasHelipad) {
@@ -1873,34 +1837,42 @@ export function buildCoastalIslandWorld(
       );
       addHelipadPerimeterLights(root, b.x, groundY + b.height + 0.48, b.z, padSize / 2 - 0.55);
     } else {
+      const qBucket = quadMicroDetailGeos[qIdx];
       const parapetH = 0.85;
       const pThick = 0.65;
       const py = groundY + b.height + parapetH * 0.5;
-      pushTransformedGeo(quadParapetGeos[qIdx], new THREE.BoxGeometry(b.width + 0.2, parapetH, pThick), b.x, py, b.z - b.depth * 0.5 + pThick * 0.5);
-      pushTransformedGeo(quadParapetGeos[qIdx], new THREE.BoxGeometry(b.width + 0.2, parapetH, pThick), b.x, py, b.z + b.depth * 0.5 - pThick * 0.5);
-      pushTransformedGeo(quadParapetGeos[qIdx], new THREE.BoxGeometry(pThick, parapetH, b.depth - pThick), b.x - b.width * 0.5 + pThick * 0.5, py, b.z);
-      pushTransformedGeo(quadParapetGeos[qIdx], new THREE.BoxGeometry(pThick, parapetH, b.depth - pThick), b.x + b.width * 0.5 - pThick * 0.5, py, b.z);
+      pushTransformedGeo(qBucket, new THREE.BoxGeometry(b.width + 0.2, parapetH, pThick), b.x, py, b.z - b.depth * 0.5 + pThick * 0.5, 0, 0, 0, 1, 1, 1, 0x9aa8b8);
+      pushTransformedGeo(qBucket, new THREE.BoxGeometry(b.width + 0.2, parapetH, pThick), b.x, py, b.z + b.depth * 0.5 - pThick * 0.5, 0, 0, 0, 1, 1, 1, 0x9aa8b8);
+      pushTransformedGeo(qBucket, new THREE.BoxGeometry(pThick, parapetH, b.depth - pThick), b.x - b.width * 0.5 + pThick * 0.5, py, b.z, 0, 0, 0, 1, 1, 1, 0x9aa8b8);
+      pushTransformedGeo(qBucket, new THREE.BoxGeometry(pThick, parapetH, b.depth - pThick), b.x + b.width * 0.5 - pThick * 0.5, py, b.z, 0, 0, 0, 1, 1, 1, 0x9aa8b8);
 
       const hvacW = b.width * 0.34;
       const hvacD = b.depth * 0.3;
       const hvacX = b.x + b.width * 0.18;
       const hvacZ = b.z - b.depth * 0.16;
-      pushTransformedGeo(quadSmallMetalGeos[qIdx], new THREE.BoxGeometry(hvacW, 2.0, hvacD), hvacX, groundY + b.height + 1.0, hvacZ);
-      pushTransformedGeo(quadFanGeos[qIdx], new THREE.CylinderGeometry(hvacW * 0.24, hvacW * 0.24, 0.25, 8), hvacX, groundY + b.height + 2.05, hvacZ);
-      pushTransformedGeo(quadDarkDetailGeos[qIdx], new THREE.BoxGeometry(3.2, 1.5, 2.6), b.x - b.width * 0.22, groundY + b.height + 0.75, b.z - b.depth * 0.22);
+      pushTransformedGeo(qBucket, new THREE.BoxGeometry(hvacW, 2.0, hvacD), hvacX, groundY + b.height + 1.0, hvacZ, 0, 0, 0, 1, 1, 1, 0x8f9eb0);
+      pushTransformedGeo(qBucket, new THREE.CylinderGeometry(hvacW * 0.24, hvacW * 0.24, 0.25, 8), hvacX, groundY + b.height + 2.05, hvacZ, 0, 0, 0, 1, 1, 1, 0x1e293b);
+      pushTransformedGeo(qBucket, new THREE.BoxGeometry(3.2, 1.5, 2.6), b.x - b.width * 0.22, groundY + b.height + 0.75, b.z - b.depth * 0.22, 0, 0, 0, 1, 1, 1, 0x4f5d6e);
 
       if (b.style === 'residential' || bIdx % 2 === 0) {
         const tankX = b.x + b.width * 0.22;
         const tankZ = b.z + b.depth * 0.22;
-        pushTransformedGeo(quadDarkDetailGeos[qIdx], new THREE.CylinderGeometry(1.15, 1.45, 1.6, 6), tankX, groundY + b.height + 0.8, tankZ);
+        pushTransformedGeo(qBucket, new THREE.CylinderGeometry(1.15, 1.45, 1.6, 6), tankX, groundY + b.height + 0.8, tankZ, 0, 0, 0, 1, 1, 1, 0x4f5d6e);
         pushTransformedGeo(
-          b.style === 'residential' ? quadWoodTankGeos[qIdx] : quadSmallMetalGeos[qIdx],
+          qBucket,
           new THREE.CylinderGeometry(1.55, 1.55, 2.5, 8),
           tankX,
           groundY + b.height + 2.8,
-          tankZ
+          tankZ,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          b.style === 'residential' ? 0x9a6b43 : 0x8f9eb0
         );
-        pushTransformedGeo(quadDarkDetailGeos[qIdx], new THREE.ConeGeometry(1.72, 0.95, 8), tankX, groundY + b.height + 4.5, tankZ);
+        pushTransformedGeo(qBucket, new THREE.ConeGeometry(1.72, 0.95, 8), tankX, groundY + b.height + 4.5, tankZ, 0, 0, 0, 1, 1, 1, 0x4f5d6e);
       }
 
       if (b.crownStyle && b.crownStyle !== 'flat') {
@@ -1909,7 +1881,7 @@ export function buildCoastalIslandWorld(
           const pyrH = sH * 0.58;
           const pyrRadius = Math.min(b.width, b.depth) * 0.62;
           pushTransformedGeo(
-            cityCrownGlassGeos,
+            cityUnifiedSolidsGeos,
             new THREE.ConeGeometry(pyrRadius, pyrH, 4),
             b.x,
             groundY + b.height + pyrH * 0.5,
@@ -1924,11 +1896,18 @@ export function buildCoastalIslandWorld(
           );
           const tipSpireH = sH * 0.55;
           pushTransformedGeo(
-            citySkyscraperSpireGeos,
+            cityUnifiedSolidsGeos,
             new THREE.CylinderGeometry(0.14, 0.42, tipSpireH, 6),
             b.x,
             groundY + b.height + pyrH + tipSpireH * 0.45,
-            b.z
+            b.z,
+            0,
+            0,
+            0,
+            1,
+            1,
+            1,
+            0x8f9eb0
           );
           skyRedBeaconCoords.push({
             x: b.x,
@@ -1946,20 +1925,25 @@ export function buildCoastalIslandWorld(
             b.z,
             b.width * 0.72,
             t1H,
-            b.depth * 0.72
+            b.depth * 0.72,
+            wallTint
           );
           pushTransformedGeo(
-            cityRoofCapGeos,
+            cityUnifiedSolidsGeos,
             new THREE.PlaneGeometry(b.width * 0.72, b.depth * 0.72),
             b.x,
             groundY + b.height + t1H,
             b.z,
             -Math.PI * 0.5,
             0,
-            0
+            0,
+            1,
+            1,
+            1,
+            0x546272
           );
           pushTransformedGeo(
-            cityCrownGlassGeos,
+            cityUnifiedSolidsGeos,
             new THREE.BoxGeometry(b.width * 0.44, t2H, b.depth * 0.44),
             b.x,
             groundY + b.height + t1H + t2H * 0.5,
@@ -1974,11 +1958,18 @@ export function buildCoastalIslandWorld(
           );
           const mastH = sH * 0.65;
           pushTransformedGeo(
-            citySkyscraperSpireGeos,
+            cityUnifiedSolidsGeos,
             new THREE.CylinderGeometry(0.16, 0.65, mastH, 6),
             b.x,
             groundY + b.height + t1H + t2H + mastH * 0.5,
-            b.z
+            b.z,
+            0,
+            0,
+            0,
+            1,
+            1,
+            1,
+            0x8f9eb0
           );
           skyRedBeaconCoords.push({
             x: b.x,
@@ -1989,7 +1980,7 @@ export function buildCoastalIslandWorld(
         } else if (b.crownStyle === 'needle') {
           const crownTierH = sH * 0.34;
           pushTransformedGeo(
-            cityCrownGlassGeos,
+            cityUnifiedSolidsGeos,
             new THREE.CylinderGeometry(b.width * 0.22, b.width * 0.58, crownTierH, 4),
             b.x,
             groundY + b.height + crownTierH * 0.5,
@@ -2003,7 +1994,7 @@ export function buildCoastalIslandWorld(
             b.accentColor
           );
           pushTransformedGeo(
-            cityCrownCollarGeos,
+            cityEmissiveGeos,
             new THREE.BoxGeometry(b.width * 0.52, 1.4, b.depth * 0.52),
             b.x,
             groundY + b.height + crownTierH * 0.35,
@@ -2011,11 +2002,18 @@ export function buildCoastalIslandWorld(
           );
           const needleH = sH * 0.85;
           pushTransformedGeo(
-            citySkyscraperSpireGeos,
+            cityUnifiedSolidsGeos,
             new THREE.CylinderGeometry(0.15, 0.85, needleH, 8),
             b.x,
             groundY + b.height + crownTierH + needleH * 0.46,
-            b.z
+            b.z,
+            0,
+            0,
+            0,
+            1,
+            1,
+            1,
+            0x8f9eb0
           );
           skyRedBeaconCoords.push({
             x: b.x,
@@ -2028,50 +2026,38 @@ export function buildCoastalIslandWorld(
         const antH = b.height >= 48 ? 14.0 : 8.5;
         const antX = b.x - b.width * 0.24;
         const antZ = b.z + b.depth * 0.22;
-        pushTransformedGeo(
-          quadSmallMetalGeos[qIdx],
-          new THREE.CylinderGeometry(0.11, 0.24, antH, 6),
-          antX,
-          groundY + b.height + antH * 0.5,
-          antZ
-        );
-        pushTransformedGeo(
-          quadSmallMetalGeos[qIdx],
-          new THREE.BoxGeometry(2.2, 0.14, 0.14),
-          antX,
-          groundY + b.height + antH * 0.72,
-          antZ
-        );
+        pushTransformedGeo(qBucket, new THREE.CylinderGeometry(0.11, 0.24, antH, 6), antX, groundY + b.height + antH * 0.5, antZ, 0, 0, 0, 1, 1, 1, 0x8f9eb0);
+        pushTransformedGeo(qBucket, new THREE.BoxGeometry(2.2, 0.14, 0.14), antX, groundY + b.height + antH * 0.72, antZ, 0, 0, 0, 1, 1, 1, 0x8f9eb0);
         skyRedBeaconCoords.push({ x: antX, y: groundY + b.height + antH + 0.35, z: antZ, r: 0.48 });
       }
     }
   });
 
-  // Finalize instanced podiums & merged city batches
-  podiumInst.instanceMatrix.needsUpdate = true;
-  if (podiumInst.instanceColor) podiumInst.instanceColor.needsUpdate = true;
-  podiumInst.computeBoundingSphere();
-  root.add(podiumInst);
-  raycastTargets.push(podiumInst);
-
-  facadeGeoBuckets.forEach((geos, mat) => {
-    const merged = mergeNormalizedGeos(geos);
+  // Finalize the 4 shared Lambert building facade meshes (ONLY giant downtown skyscrapers cast shadows in High/Ultra!)
+  let giantSkyscraperMesh: THREE.Mesh | null = null;
+  (['office', 'residential', 'hospital', 'tower'] as const).forEach((key) => {
+    const merged = mergeNormalizedGeos(facadeBuckets[key], true);
     if (!merged) return;
-    const mesh = new THREE.Mesh(merged, mat);
-    mesh.castShadow = true;
+    const mesh = new THREE.Mesh(merged, sharedFacadeMats[key]);
+    mesh.castShadow = key === 'tower';
     mesh.receiveShadow = true;
     root.add(mesh);
     raycastTargets.push(mesh);
+    if (key === 'tower') {
+      giantSkyscraperMesh = mesh;
+    }
   });
 
-  const mergedRoofCaps = mergeNormalizedGeos(cityRoofCapGeos);
-  if (mergedRoofCaps) {
-    const m = new THREE.Mesh(mergedRoofCaps, roofConcreteMat);
-    m.receiveShadow = true;
-    m.castShadow = false;
-    root.add(m);
-    raycastTargets.push(m);
+  // 1 single draw call for ALL building podiums, roof caps, crowns, spires, Central Park & Arena Central Stadium!
+  const mergedCitySolids = mergeNormalizedGeos(cityUnifiedSolidsGeos, true);
+  if (mergedCitySolids) {
+    const citySolidsMesh = new THREE.Mesh(mergedCitySolids, vertexColorLambertMat);
+    citySolidsMesh.castShadow = false;
+    citySolidsMesh.receiveShadow = true;
+    root.add(citySolidsMesh);
+    raycastTargets.push(citySolidsMesh);
   }
+
   const mergedStdPads = mergeNormalizedGeos(cityPadStdGeos);
   if (mergedStdPads) {
     const m = new THREE.Mesh(mergedStdPads, sharedStandardPadMat);
@@ -2088,55 +2074,23 @@ export function buildCoastalIslandWorld(
     root.add(m);
     raycastTargets.push(m);
   }
-  const mergedCrowns = mergeNormalizedGeos(cityCrownGlassGeos, true);
-  if (mergedCrowns) {
-    const m = new THREE.Mesh(mergedCrowns, crownGlassVertexMat);
-    m.castShadow = true;
-    m.receiveShadow = true;
-    root.add(m);
-  }
-  const mergedCollars = mergeNormalizedGeos(cityCrownCollarGeos);
-  if (mergedCollars) {
-    const m = new THREE.Mesh(mergedCollars, chaletWindowMat);
+  const mergedCityEmissives = mergeNormalizedGeos(cityEmissiveGeos);
+  if (mergedCityEmissives) {
+    const m = new THREE.Mesh(mergedCityEmissives, stadiumFloodMat);
     m.castShadow = false;
-    root.add(m);
-  }
-  const mergedSpires = mergeNormalizedGeos(citySkyscraperSpireGeos);
-  if (mergedSpires) {
-    const m = new THREE.Mesh(mergedSpires, rooftopMetalMat);
-    m.castShadow = false;
-    m.receiveShadow = true;
     root.add(m);
   }
 
-  // Build 4 spatial quadrant small-detail groups (hidden > 390m while preserving skyscraper silhouettes!)
+  // 4 spatial quadrant micro-detail meshes (1 Lambert draw call per quadrant, hidden > 450m–540m)
   for (let q = 0; q < 4; q++) {
-    const quadGroup = new THREE.Group();
-    const quadBox = new THREE.Box3();
-    let hasAny = false;
-
-    const addQuadMesh = (geos: THREE.BufferGeometry[], mat: THREE.Material, receive = true) => {
-      const merged = mergeNormalizedGeos(geos);
-      if (!merged) return;
-      const m = new THREE.Mesh(merged, mat);
-      m.castShadow = false;
-      m.receiveShadow = receive;
-      quadGroup.add(m);
-      if (merged.boundingBox) quadBox.union(merged.boundingBox);
-      hasAny = true;
-    };
-
-    addQuadMesh(quadParapetGeos[q], concreteMat, true);
-    addQuadMesh(quadSmallMetalGeos[q], rooftopMetalMat, true);
-    addQuadMesh(quadWoodTankGeos[q], rooftopWoodTankMat, true);
-    addQuadMesh(quadDarkDetailGeos[q], darkConcreteMat, true);
-    addQuadMesh(quadFanGeos[q], rooftopFanMat, false);
-
-    if (hasAny) {
-      root.add(quadGroup);
-      const qSphere = new THREE.Sphere();
-      quadBox.getBoundingSphere(qSphere);
-      spatialLOD.addDetailLayer(quadGroup, qSphere, 540, 450);
+    const merged = mergeNormalizedGeos(quadMicroDetailGeos[q], true);
+    if (!merged) continue;
+    const m = new THREE.Mesh(merged, vertexColorLambertMat);
+    m.castShadow = false;
+    m.receiveShadow = true;
+    root.add(m);
+    if (merged.boundingSphere) {
+      spatialLOD.addDetailLayer(m, merged.boundingSphere.clone(), 540, 450);
     }
   }
 
@@ -5664,6 +5618,10 @@ export function buildCoastalIslandWorld(
 
   const setGraphicsQuality = (quality: GraphicsQuality) => {
     currentQuality = quality;
+    const allowGiantBuildingShadows = quality === 'ultra' || quality === 'high';
+    if (giantSkyscraperMesh) {
+      giantSkyscraperMesh.castShadow = allowGiantBuildingShadows;
+    }
     qualityParticleScale =
       quality === 'ultra' ? 1.0 : quality === 'high' ? 0.92 : quality === 'medium' ? 0.68 : 0.45;
     for (let i = 0; i < cloudEntries.length; i++) {

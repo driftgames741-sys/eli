@@ -359,6 +359,8 @@ export interface TelemetryState {
   masterVolume: number;
   radioVolume: number;
   graphicsQuality: GraphicsQuality;
+  fps: number;
+  drawCalls: number;
 }
 
 export interface MinimapStaticData {

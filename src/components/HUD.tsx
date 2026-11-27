@@ -1160,8 +1160,23 @@ export function HUD({
           )}
         </div>
 
-        {/* BOTTOM-RIGHT: Discreet Collapsible Controls Reference Card (Key H, collapsed by default) */}
-        <div className="pointer-events-auto shrink-0">
+        {/* BOTTOM-RIGHT: Discreet FPS / Draw Calls Meter + Collapsible Controls Reference Card */}
+        <div className="pointer-events-auto shrink-0 flex flex-col items-end gap-1.5">
+          <div className="pointer-events-none bg-slate-950/60 backdrop-blur-sm border border-slate-700/50 rounded px-2 py-0.5 text-[10px] font-mono-tech tabular-nums shadow">
+            <span
+              className={
+                telemetry.fps >= 50
+                  ? 'text-emerald-300 font-semibold'
+                  : telemetry.fps >= 30
+                    ? 'text-amber-300 font-semibold'
+                    : 'text-red-400 font-semibold'
+              }
+            >
+              {telemetry.fps} FPS
+            </span>
+            <span className="text-slate-500 mx-1.5">|</span>
+            <span className="text-sky-300 font-semibold">{telemetry.drawCalls} calls</span>
+          </div>
           {showControls ? (
             <div className="bg-slate-950/65 backdrop-blur-sm border border-slate-700/60 rounded-lg p-2 sm:p-2.5 shadow-md w-[206px] sm:w-[224px] max-w-[44vw]">
               <div className="flex items-center justify-between pb-1.5 mb-1.5 border-b border-slate-800/80">

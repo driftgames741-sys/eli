@@ -81,6 +81,8 @@ const INITIAL_TELEMETRY: TelemetryState = {
   masterVolume: 0.85,
   radioVolume: 0.72,
   graphicsQuality: 'high',
+  fps: 60,
+  drawCalls: 0,
 };
 
 export default function App() {
@@ -403,12 +405,12 @@ export default function App() {
                   <span className="text-slate-300">Gráficos / LOD</span>
                   <span className="text-[10px] text-slate-400">
                     {telemetry.graphicsQuality === 'ultra'
-                      ? 'Sombras 2K · Alcance Máx.'
+                      ? 'Sombras 1K · Arranha-Céus'
                       : telemetry.graphicsQuality === 'high'
-                        ? 'Sombras · LOD Padrão'
+                        ? 'Sombras 1K · Balanceado'
                         : telemetry.graphicsQuality === 'medium'
-                          ? 'Sem Sombras · LOD Médio'
-                          : 'Máx. FPS · LOD Agressivo'}
+                          ? 'Sombras 512 · Só Heli'
+                          : 'Ultra Leve · 512 Heli'}
                   </span>
                 </div>
                 <div className="grid grid-cols-4 gap-1 bg-slate-950/90 p-0.5 rounded-md border border-slate-800">

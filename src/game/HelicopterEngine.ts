@@ -326,6 +326,10 @@ export class HelicopterEngine {
   private sunGlowBaseVis = 1.0;
   private camera: THREE.PerspectiveCamera;
   private readonly cameraFrustum = new THREE.Frustum();
+  private fpsFrameCount = 0;
+  private fpsSampleStartMs = 0;
+  private currentFps = 60;
+  private currentDrawCalls = 0;
   private hemiLight: THREE.HemisphereLight;
   private sunLight: THREE.DirectionalLight;
   private rimLight: THREE.DirectionalLight;
@@ -521,8 +525,7 @@ export class HelicopterEngine {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.0;
     this.renderer.setPixelRatio(this.getTargetPixelRatio(this.graphicsQuality));
-    this.renderer.shadowMap.enabled =
-      !this.isSoftwareGl && (this.graphicsQuality === 'ultra' || this.graphicsQuality === 'high');
+    this.renderer.shadowMap.enabled = !this.isSoftwareGl;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.setSize(
       container.clientWidth || window.innerWidth,
@@ -757,9 +760,9 @@ export class HelicopterEngine {
 
     const sunLight = new THREE.DirectionalLight(0xfff5e4, 1.75);
     sunLight.position.set(170, 135, 138);
-    sunLight.castShadow =
-      !this.isSoftwareGl && (this.graphicsQuality === 'ultra' || this.graphicsQuality === 'high');
-    const initShadowRes = this.graphicsQuality === 'ultra' ? 2048 : 1024;
+    sunLight.castShadow = !this.isSoftwareGl;
+    const initShadowRes =
+      this.graphicsQuality === 'ultra' || this.graphicsQuality === 'high' ? 1024 : 512;
     sunLight.shadow.mapSize.width = initShadowRes;
     sunLight.shadow.mapSize.height = initShadowRes;
     const shadowBound = 200;
@@ -1119,8 +1122,8 @@ export class HelicopterEngine {
     } catch {
       // Ignore storage errors in restricted iframes
     }
-    const useShadows = !this.isSoftwareGl && (quality === 'ultra' || quality === 'high');
-    const targetShadowRes = quality === 'ultra' ? 2048 : 1024;
+    const useShadows = !this.isSoftwareGl;
+    const targetShadowRes = quality === 'ultra' || quality === 'high' ? 1024 : 512;
     if (this.sunLight.shadow.mapSize.width !== targetShadowRes) {
       this.sunLight.shadow.mapSize.set(targetShadowRes, targetShadowRes);
       if (this.sunLight.shadow.map) {
@@ -4315,6 +4318,8 @@ export class HelicopterEngine {
       masterVolume: this.audio.getMasterVolume(),
       radioVolume: this.audio.getRadioVolume(),
       graphicsQuality: this.graphicsQuality,
+      fps: this.currentFps,
+      drawCalls: this.currentDrawCalls,
     });
   }
 
@@ -4592,6 +4597,18 @@ export class HelicopterEngine {
     }
 
     this.renderer.render(this.scene, this.camera);
+    this.currentDrawCalls = this.renderer.info.render.calls;
+    this.fpsFrameCount++;
+    if (this.fpsSampleStartMs === 0) {
+      this.fpsSampleStartMs = now;
+    } else {
+      const fpsElapsed = now - this.fpsSampleStartMs;
+      if (fpsElapsed >= 350) {
+        this.currentFps = Math.round((this.fpsFrameCount * 1000) / Math.max(1, fpsElapsed));
+        this.fpsFrameCount = 0;
+        this.fpsSampleStartMs = now;
+      }
+    }
     this.scheduleNextFrame();
   }
 

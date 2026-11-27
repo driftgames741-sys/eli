@@ -127,8 +127,8 @@ export class LivingWorldSystem {
   private farCarTailDotInst: THREE.InstancedMesh;
   private urbanCullSphere: THREE.Sphere;
 
-  private carHeadlightMat: THREE.MeshStandardMaterial;
-  private carTaillightMat: THREE.MeshStandardMaterial;
+  private carHeadlightMat: THREE.MeshLambertMaterial;
+  private carTaillightMat: THREE.MeshLambertMaterial;
   private carBeamMat: THREE.MeshBasicMaterial;
   private farCarHeadDotMat: THREE.MeshBasicMaterial;
   private farCarTailDotMat: THREE.MeshBasicMaterial;
@@ -150,10 +150,8 @@ export class LivingWorldSystem {
     // === 1. INSTANCED URBAN CAR TRAFFIC ===
     const bodyGeo = this.trackGeo(new THREE.BoxGeometry(1.74, 0.56, 3.62));
     const bodyMat = this.trackMat(
-      new THREE.MeshStandardMaterial({
+      new THREE.MeshLambertMaterial({
         color: 0xffffff,
-        roughness: 0.42,
-        metalness: 0.34,
       })
     );
     this.carBodyInst = new THREE.InstancedMesh(bodyGeo, bodyMat, this.carCount);
@@ -163,10 +161,8 @@ export class LivingWorldSystem {
 
     const cabinGeo = this.trackGeo(new THREE.BoxGeometry(1.44, 0.48, 1.82));
     const cabinMat = this.trackMat(
-      new THREE.MeshStandardMaterial({
+      new THREE.MeshLambertMaterial({
         color: 0x1e293b,
-        roughness: 0.16,
-        metalness: 0.72,
       })
     );
     this.carCabinInst = new THREE.InstancedMesh(cabinGeo, cabinMat, this.carCount);
@@ -174,11 +170,10 @@ export class LivingWorldSystem {
 
     const headlightGeo = this.trackGeo(new THREE.BoxGeometry(1.38, 0.15, 0.12));
     this.carHeadlightMat = this.trackMat(
-      new THREE.MeshStandardMaterial({
+      new THREE.MeshLambertMaterial({
         color: 0xfef9c3,
         emissive: 0xfff3b0,
         emissiveIntensity: 0.15,
-        roughness: 0.2,
       })
     );
     this.carHeadlightInst = new THREE.InstancedMesh(
@@ -190,11 +185,10 @@ export class LivingWorldSystem {
 
     const taillightGeo = this.trackGeo(new THREE.BoxGeometry(1.38, 0.14, 0.12));
     this.carTaillightMat = this.trackMat(
-      new THREE.MeshStandardMaterial({
+      new THREE.MeshLambertMaterial({
         color: 0x991b1b,
         emissive: 0xff1f1f,
         emissiveIntensity: 0.12,
-        roughness: 0.25,
       })
     );
     this.carTaillightInst = new THREE.InstancedMesh(
