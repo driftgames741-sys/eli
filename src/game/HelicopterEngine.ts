@@ -22,7 +22,6 @@ import {
 import {
   BAMBI_CABLE_LENGTH,
   createHelicopterRig,
-  SEARCHLIGHT_SPOT_ANGLE,
   type HelicopterRig,
 } from './HelicopterModel';
 import { LivingWorldSystem } from './LivingWorldSystem';
@@ -205,6 +204,8 @@ const _tmpBlizHor = new THREE.Color();
 const _tmpBlizFog = new THREE.Color();
 const _vecSunDir = new THREE.Vector3(0.5, 0.72, 0.48).normalize();
 const _vecCamForward = new THREE.Vector3();
+const _vecBeamDir = new THREE.Vector3();
+const _vecHitPoint = new THREE.Vector3();
 
 const RANK_TITLES = [
   'Cadete',
@@ -383,6 +384,7 @@ export class HelicopterEngine {
   private searchlightMode: SearchlightMode = 'FRONTAL';
   private radioStation: RadioStation = 'OFF';
   private raycaster = new THREE.Raycaster();
+  private beamRaycaster = new THREE.Raycaster();
   private mouseNdc = new THREE.Vector2(0, -0.18);
   private gimbalRelOffset = new THREE.Vector3(0, -18, -32);
   private lightningFlash = 0;
@@ -833,7 +835,8 @@ export class HelicopterEngine {
     const initLivery = getLiveryScheme(this.liveryId);
     this.heli.applyLivery(initLivery.primaryHex, initLivery.secondaryHex, initLivery.accentHex);
     this.scene.add(this.heli.root);
-    this.scene.add(this.heli.searchlightTarget);
+    this.scene.add(this.heli.searchlight);
+    this.scene.add(this.heli.searchlight.target);
     this.scene.add(this.heli.searchlightCone);
     this.scene.add(this.heli.bucketPivot);
     this.scene.add(this.heli.landingMarker);
@@ -1306,7 +1309,8 @@ export class HelicopterEngine {
 
     // Hot-swap 3D helicopter rig cleanly without leaking GPU resources
     this.scene.remove(this.heli.root);
-    this.scene.remove(this.heli.searchlightTarget);
+    this.scene.remove(this.heli.searchlight);
+    this.scene.remove(this.heli.searchlight.target);
     this.scene.remove(this.heli.searchlightCone);
     this.scene.remove(this.heli.bucketPivot);
     this.scene.remove(this.heli.landingMarker);
@@ -1317,7 +1321,8 @@ export class HelicopterEngine {
     this.heli.applyLivery(livery.primaryHex, livery.secondaryHex, livery.accentHex);
     this.heli.setCockpitView(this.cameraMode === 'cockpit' && this.phase !== 'title');
     this.scene.add(this.heli.root);
-    this.scene.add(this.heli.searchlightTarget);
+    this.scene.add(this.heli.searchlight);
+    this.scene.add(this.heli.searchlight.target);
     this.scene.add(this.heli.searchlightCone);
     this.scene.add(this.heli.bucketPivot);
     this.scene.add(this.heli.landingMarker);
@@ -4103,7 +4108,7 @@ export class HelicopterEngine {
         }
       }
 
-      const maxReach = 148;
+      const maxReach = 260;
       if (!hasHit) {
         // Cursor pointed above horizon: sweep smoothly along cursor horizontal azimuth at max reach
         const horizLen = Math.hypot(rayD.x, rayD.z);
@@ -4171,13 +4176,9 @@ export class HelicopterEngine {
 
     _vecBeamTargetWorld.copy(_vecBeamOriginWorld).add(this.gimbalRelOffset);
 
-    // 1. Sync SpotLight.target in world space
-    this.heli.searchlightTarget.position.copy(_vecBeamTargetWorld);
-    this.heli.searchlightTarget.updateMatrixWorld();
-
-    // 2. Rotate physical nose gimbal housing toward world target (safe up vector when aiming straight down)
-    const horizBeamDist = Math.hypot(this.gimbalRelOffset.x, this.gimbalRelOffset.z);
-    if (horizBeamDist < 0.14) {
+    // 1. Orient physical nose gimbal first so we get the EXACT world-space lens tip coordinate
+    const horizAimDist = Math.hypot(this.gimbalRelOffset.x, this.gimbalRelOffset.z);
+    if (horizAimDist < 0.14) {
       this.heli.searchlightGimbal.up.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
     } else {
       this.heli.searchlightGimbal.up.copy(_vecUp);
@@ -4185,43 +4186,155 @@ export class HelicopterEngine {
     this.heli.searchlightGimbal.lookAt(_vecBeamTargetWorld);
     this.heli.searchlightGimbal.updateMatrixWorld(true);
 
-    // 3. Drive real SpotLight intensity & volumetric cone geometry (lookAt + dynamic length to ground)
+    // Exact shared world-space origin of BOTH the SpotLight and the volumetric cone apex (nose gimbal lens)
+    _vecBeamLensWorld.set(0, 0, 0.24).applyMatrix4(this.heli.searchlightGimbal.matrixWorld);
+
     const isOn = this.searchlightOn;
-    this.heli.searchlight.intensity = isOn ? 190 + nightFactor * 430 : 0;
-    this.heli.searchlightBulbMat.emissiveIntensity = isOn ? 4.6 : 0;
+    this.heli.searchlightBulbMat.emissiveIntensity = isOn ? 4.8 : 0;
     this.heli.searchlightCone.visible = isOn;
 
-    if (isOn) {
-      this.heli.searchlight.getWorldPosition(_vecBeamLensWorld);
-      this.heli.searchlightCone.position.copy(_vecBeamLensWorld);
-      if (horizBeamDist < 0.14) {
-        this.heli.searchlightCone.up.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
-      } else {
-        this.heli.searchlightCone.up.copy(_vecUp);
-      }
-      this.heli.searchlightCone.lookAt(_vecBeamTargetWorld);
-
-      const beamDist = Math.max(2.2, _vecBeamLensWorld.distanceTo(_vecBeamTargetWorld));
-      const coneLen = Math.min(beamDist, 185);
-      const coneRadius = THREE.MathUtils.clamp(
-        coneLen * Math.tan(SEARCHLIGHT_SPOT_ANGLE) * 0.96,
-        0.55,
-        32
-      );
-      this.heli.searchlightCone.scale.set(coneRadius, coneRadius, coneLen);
-
-      const coneMat = this.heli.searchlightCone.material as THREE.MeshBasicMaterial;
-      const topDownDamp =
-        this.cameraMode === 'topdown'
-          ? this.searchlightMode === 'VERTICAL'
-            ? 0.55
-            : 0.72
-          : 1.0;
-      coneMat.opacity =
-        (this.weather === 'FOG' || this.weather === 'BLIZZARD'
-          ? 0.088 + nightFactor * 0.035
-          : 0.065 + nightFactor * 0.045) * topDownDamp;
+    if (!isOn) {
+      this.heli.searchlight.intensity = 0;
+      _vecHitPoint.copy(_vecBeamTargetWorld);
+      return;
     }
+
+    // 2. Cast ONE unified ray from the exact lens world origin along the aimed direction to find ONE single hitPoint
+    _vecBeamDir.copy(_vecBeamTargetWorld).sub(_vecBeamLensWorld);
+    if (_vecBeamDir.lengthSq() < 0.0001) {
+      _vecBeamDir.set(0, -1, 0);
+    } else {
+      _vecBeamDir.normalize();
+    }
+    if (_vecBeamDir.y > -0.05) {
+      _vecBeamDir.y = -0.05;
+      _vecBeamDir.normalize();
+    }
+
+    const maxBeamDist = 650;
+    let bestHitDist = maxBeamDist;
+    let foundHit = false;
+
+    // 2A. Raycast against buildings, rooftops, helipads, oil rigs, dam & static landmarks
+    this.beamRaycaster.near = 1.5;
+    this.beamRaycaster.far = maxBeamDist;
+    this.beamRaycaster.set(_vecBeamLensWorld, _vecBeamDir);
+    const structHits = this.beamRaycaster.intersectObjects(this.world.raycastTargets, false);
+    if (structHits.length > 0 && structHits[0].distance < bestHitDist) {
+      bestHitDist = structHits[0].distance;
+      _vecHitPoint.copy(structHits[0].point);
+      foundHit = true;
+    }
+
+    // 2B. Ray-march + binary refinement against exact island terrain & ocean heightfield
+    const marchMax = Math.min(bestHitDist, maxBeamDist);
+    let tPrev = 1.5;
+    let tCurr = 1.5;
+    let terrainHitT = -1;
+    while (tCurr < marchMax) {
+      const step = Math.max(3.0, tCurr * 0.045);
+      tPrev = tCurr;
+      tCurr = Math.min(marchMax, tCurr + step);
+      const rx = _vecBeamLensWorld.x + _vecBeamDir.x * tCurr;
+      const ry = _vecBeamLensWorld.y + _vecBeamDir.y * tCurr;
+      const rz = _vecBeamLensWorld.z + _vecBeamDir.z * tCurr;
+      const surfY = getSurfaceHeightAt(rx, rz);
+      if (ry <= surfY) {
+        let lo = tPrev;
+        let hi = tCurr;
+        for (let iter = 0; iter < 6; iter++) {
+          const mid = (lo + hi) * 0.5;
+          const mx = _vecBeamLensWorld.x + _vecBeamDir.x * mid;
+          const my = _vecBeamLensWorld.y + _vecBeamDir.y * mid;
+          const mz = _vecBeamLensWorld.z + _vecBeamDir.z * mid;
+          if (my <= getSurfaceHeightAt(mx, mz)) {
+            hi = mid;
+          } else {
+            lo = mid;
+          }
+        }
+        terrainHitT = hi;
+        break;
+      }
+    }
+
+    if (terrainHitT > 0 && terrainHitT < bestHitDist) {
+      bestHitDist = terrainHitT;
+      const hx = _vecBeamLensWorld.x + _vecBeamDir.x * terrainHitT;
+      const hz = _vecBeamLensWorld.z + _vecBeamDir.z * terrainHitT;
+      const hy = getSurfaceHeightAt(hx, hz);
+      _vecHitPoint.set(hx, hy, hz);
+      foundHit = true;
+    }
+
+    if (!foundHit) {
+      // Fallback: project ray onto surface at maxBeamDist so hitPoint ALWAYS sits on real ground/water
+      const fx = _vecBeamLensWorld.x + _vecBeamDir.x * maxBeamDist;
+      const fz = _vecBeamLensWorld.z + _vecBeamDir.z * maxBeamDist;
+      const fy = getSurfaceHeightAt(fx, fz);
+      _vecHitPoint.set(fx, fy, fz);
+    }
+
+    // Re-lock physical gimbal housing onto the exact unified hitPoint
+    const hitHorizDist = Math.hypot(
+      _vecHitPoint.x - _vecBeamLensWorld.x,
+      _vecHitPoint.z - _vecBeamLensWorld.z
+    );
+    if (hitHorizDist < 0.14) {
+      this.heli.searchlightGimbal.up.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
+    } else {
+      this.heli.searchlightGimbal.up.copy(_vecUp);
+    }
+    this.heli.searchlightGimbal.lookAt(_vecHitPoint);
+    this.heli.searchlightGimbal.updateMatrixWorld(true);
+
+    // 3. Apply the SINGLE world origin (_vecBeamLensWorld) & SINGLE hitPoint (_vecHitPoint) to SpotLight & Volumetric Cone
+    const dist = Math.max(1.5, _vecBeamLensWorld.distanceTo(_vecHitPoint));
+    const targetRadius = THREE.MathUtils.clamp(dist * 0.045, 5, 16);
+    const dynamicAngle = Math.atan(targetRadius / Math.max(dist, 1));
+
+    // 3A. Single real SpotLight (direct child of scene + target direct child of scene; zero artificial ground disc)
+    const lightDist = dist * 1.45 + 35;
+    this.heli.searchlight.position.copy(_vecBeamLensWorld);
+    this.heli.searchlight.updateMatrixWorld();
+    this.heli.searchlight.target.position.copy(_vecHitPoint);
+    this.heli.searchlight.target.updateMatrixWorld();
+    this.heli.searchlight.angle = dynamicAngle;
+    this.heli.searchlight.penumbra = 0.25;
+    this.heli.searchlight.decay = 0.5;
+    this.heli.searchlight.distance = lightDist;
+
+    // Physical attenuation-compensated intensity so the single ground pool stays crisp & bright at all altitudes
+    const distRatio = dist / lightDist;
+    const windowFactor = Math.pow(
+      Math.max(0.05, 1 - distRatio * distRatio * distRatio * distRatio),
+      2
+    );
+    const atten = windowFactor / Math.pow(Math.max(dist, 1), 0.5);
+    const targetIrradiance = 7.5 + nightFactor * 8.5;
+    this.heli.searchlight.intensity = targetIrradiance / Math.max(atten, 0.01);
+
+    // 3B. Translucent volumetric air beam cone connecting exact originWorld -> hitPoint (fades to 0 at tip)
+    this.heli.searchlightCone.position.copy(_vecBeamLensWorld);
+    if (hitHorizDist < 0.14) {
+      this.heli.searchlightCone.up.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
+    } else {
+      this.heli.searchlightCone.up.copy(_vecUp);
+    }
+    this.heli.searchlightCone.lookAt(_vecHitPoint);
+    this.heli.searchlightCone.scale.set(targetRadius, targetRadius, dist);
+
+    const coneMat = this.heli.searchlightCone.material as THREE.MeshBasicMaterial;
+    const topDownDamp =
+      this.cameraMode === 'topdown'
+        ? this.searchlightMode === 'VERTICAL'
+          ? 0.45
+          : 0.65
+        : 1.0;
+    coneMat.opacity =
+      (this.weather === 'FOG' || this.weather === 'BLIZZARD'
+        ? 0.16 + nightFactor * 0.08
+        : 0.11 + nightFactor * 0.08) * topDownDamp;
   }
 
   private emitTelemetry(): void {
@@ -4506,8 +4619,8 @@ export class HelicopterEngine {
         heliAccel: _vecHeliAccel,
         isLanded: this.isLanded,
         searchlightOn: this.searchlightOn,
-        beamOriginWorld: _vecBeamOriginWorld,
-        beamTargetWorld: _vecBeamTargetWorld,
+        beamOriginWorld: _vecBeamLensWorld,
+        beamTargetWorld: _vecHitPoint,
         winchAnchorWorld,
         rescueRewardMult: this.activeSpec.physics.rescueRewardMult,
       });

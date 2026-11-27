@@ -1886,9 +1886,8 @@ export function createDauphinAS365Rig(maxAnisotropy: number): HelicopterRig {
   searchBulb.position.set(0, 0, 0.22);
   searchlightGimbal.add(searchBulb);
 
-  const searchlight = new THREE.SpotLight(0xfff5d6, 0, 310, SEARCHLIGHT_SPOT_ANGLE, 0.28, 0.82);
-  searchlight.position.set(0, 0, 0.24);
-  searchlightGimbal.add(searchlight);
+  const searchlight = new THREE.SpotLight(0xfffaf0, 0, 520, SEARCHLIGHT_SPOT_ANGLE, 0.25, 0.5);
+  searchlight.position.copy(gimbalMountPos);
 
   const searchlightTarget = new THREE.Object3D();
   searchlightTarget.position.set(0, -18, -32);
@@ -1897,13 +1896,34 @@ export function createDauphinAS365Rig(maxAnisotropy: number): HelicopterRig {
   const coneGeo = trackGeo(new THREE.ConeGeometry(1, 1, 24, 1, true));
   coneGeo.translate(0, -0.5, 0);
   coneGeo.rotateX(-Math.PI / 2);
+
+  const coneCanvas = document.createElement('canvas');
+  coneCanvas.width = 4;
+  coneCanvas.height = 64;
+  const coneCtx = coneCanvas.getContext('2d');
+  if (coneCtx) {
+    const grad = coneCtx.createLinearGradient(0, 0, 0, 64);
+    grad.addColorStop(0.0, 'rgba(255, 248, 224, 0.95)');
+    grad.addColorStop(0.18, 'rgba(255, 245, 214, 0.78)');
+    grad.addColorStop(0.58, 'rgba(255, 242, 204, 0.34)');
+    grad.addColorStop(0.86, 'rgba(255, 238, 196, 0.08)');
+    grad.addColorStop(1.0, 'rgba(255, 238, 196, 0.0)');
+    coneCtx.fillStyle = grad;
+    coneCtx.fillRect(0, 0, 4, 64);
+  }
+  const coneTex = new THREE.CanvasTexture(coneCanvas);
+  coneTex.colorSpace = THREE.SRGBColorSpace;
+  coneTex.needsUpdate = true;
+  textures.push(coneTex);
+
   const coneMat = trackMat(
     new THREE.MeshBasicMaterial({
+      map: coneTex,
       color: 0xfff3c4,
       transparent: true,
-      opacity: 0.09,
+      opacity: 0.14,
       depthWrite: false,
-      side: THREE.DoubleSide,
+      side: THREE.FrontSide,
       blending: THREE.AdditiveBlending,
     })
   );
